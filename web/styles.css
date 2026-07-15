@@ -37,3 +37,12 @@ body.col-resizing{cursor:col-resize;user-select:none}
 .bigview-toolbar button{background:#26313e;color:#e6edf5;border-color:#3a4a5a}
 .bigview-toolbar button:hover{background:#334150}
 .bigview-stage{flex:1;background:#0f1620;cursor:grab}
+
+/* Nationality code correction/validation UI */
+.detail-form input.invalid{border-color:#e05353;background:#fff2f2}
+.nat-hint{grid-column:1/-1;font-size:12px;line-height:1.55;margin:0 0 4px 130px}
+.nat-hint.warn{color:#8a5a00;background:#fff8e6;border:1px solid #ffe1a1;border-radius:5px;padding:5px 8px}
+.nat-hint.bad{color:var(--bad)}
+.nat-cand{margin:3px 5px 0 0;border:1px solid #cfd7e0;background:#fff;border-radius:5px;padding:3px 8px;cursor:pointer;font-size:12px}
+.nat-cand:hover{background:#eef5fd;border-color:var(--blue)}
+td.nat-bad{background:#fff2f2;color:var(--bad);font-weight:600}

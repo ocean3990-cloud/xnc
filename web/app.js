@@ -99,6 +99,37 @@ function normalizeNationality(value){
   const byName=countryNameToCode.get(normalizeKey(raw));
   return byName || exact.slice(0,20);
 }
+// Common OCR letter/digit confusions (bidirectional) for nationality codes.
+const OCR_AMBIG={A:['4'],'4':['A'],O:['0'],'0':['O'],I:['1'],'1':['I'],S:['5'],'5':['S'],B:['8'],'8':['B'],G:['6'],'6':['G'],Z:['2'],'2':['Z']};
+// correctNationalityCode: for a 3-char code that is NOT in the export template,
+// try the OCR swaps above. Returns {corrected:true, code} only when EXACTLY one
+// valid template code results (e.g. US4→USA, U5A→USA). If several valid codes are
+// reachable, or none, returns {corrected:false, candidates:[...]} so staff can pick.
+function correctNationalityCode(cand){
+  cand=String(cand||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  if(cand.length!==3) return {corrected:false, candidates:nearNationalityCodes(cand)};
+  const found=new Set();
+  const opts=[...cand].map(ch=>[ch,...(OCR_AMBIG[ch]||[])]);
+  for(const a of opts[0])for(const b of opts[1])for(const c of opts[2]){
+    const code=a+b+c;
+    if(/^[A-Z]{3}$/.test(code) && countryByCode.has(code)) found.add(code);
+  }
+  const arr=[...found];
+  if(arr.length===1) return {corrected:true, code:arr[0]};
+  return {corrected:false, candidates:arr.length?arr:nearNationalityCodes(cand)};
+}
+// nearNationalityCodes: valid template codes that differ from cand in at most one
+// position (used for the red "pick a code" list when correction is inconclusive).
+function nearNationalityCodes(cand){
+  cand=String(cand||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,3);
+  if(cand.length!==3) return [];
+  const out=[];
+  for(const code of countryByCode.keys()){
+    let d=0; for(let i=0;i<3;i++) if(code[i]!==cand[i]) d++;
+    if(d<=1){ out.push(code); if(out.length>=10) break; }
+  }
+  return out;
+}
 function normalizePassport(value){ return upper(value).replace(/[^A-Z0-9]/g,''); }
 function normalizeRoom(value){ return upper(value).replace(/\s+/g,''); }
 function normalizeName(value){ return settings.autoUppercase ? upper(value) : cleanText(value); }
@@ -117,7 +148,7 @@ function makeGuest(input={}, source={}){
     passport:normalizePassport(input.passport), room:normalizeRoom(input.room),
     arrival, departure, checkout,
     forceReview:!!input.forceReview, sourceName:source.name||'', sourceType:source.type||'', preview:source.preview||'',
-    confidence:source.confidence??null, status:'review', reasons:[]
+    confidence:source.confidence??null, status:'review', reasons:[], natNote:'', natInvalid:false, natCandidates:[]
   };
 }
 
@@ -147,9 +178,14 @@ function validateAll(){
     if(!g.birthDate) reasons.push('Thiếu ngày sinh'); else if(!isValidDate(g.birthDate,g.birthPrecision)) reasons.push('Ngày sinh không hợp lệ');
     if(!['D','M','Y'].includes(g.birthPrecision)) reasons.push('Sai độ chính xác ngày sinh');
     if(!['M','F'].includes(g.gender)) reasons.push('Thiếu giới tính');
-    if(!g.nationality) reasons.push('Thiếu quốc tịch');
-    else if(!/^[A-Z]{3}$/.test(g.nationality)) reasons.push('Mã quốc tịch phải gồm 3 chữ cái');
-    else if(countryByCode.size && !countryByCode.has(g.nationality)) reasons.push('Mã quốc tịch không có trong mẫu');
+    if(!g.nationality){ reasons.push('Thiếu quốc tịch'); g.natInvalid=false; g.natCandidates=[]; g.natNote=''; }
+    else if(!countryByCode.size){ if(!/^[A-Z]{3}$/.test(g.nationality)) reasons.push('Mã quốc tịch phải gồm 3 chữ cái'); }
+    else if(countryByCode.has(g.nationality)){ g.natInvalid=false; g.natCandidates=[]; }
+    else {
+      const fix=correctNationalityCode(g.nationality);
+      if(fix.corrected){ g.natNote=`${g.nationality} đã được hiệu chỉnh thành ${fix.code}.`; g.nationality=fix.code; g.natInvalid=false; g.natCandidates=[]; }
+      else { reasons.push('Mã quốc tịch không hợp lệ'); g.natInvalid=true; g.natCandidates=fix.candidates||[]; g.natNote=''; }
+    }
     if(!g.passport) reasons.push('Thiếu số hộ chiếu');
     if(!g.room) reasons.push('Thiếu số phòng');
     if(!g.arrival) reasons.push('Thiếu ngày đến'); else if(!isValidDate(g.arrival,'D')) reasons.push('Ngày đến không hợp lệ');
@@ -184,7 +220,7 @@ function renderTable(){
       <td contenteditable="true" data-field="birthDate">${escapeHtml(g.birthDate)}</td>
       <td><select class="grid-select" data-field="birthPrecision"><option value="" ${!g.birthPrecision?'selected':''}></option><option ${g.birthPrecision==='D'?'selected':''}>D</option><option ${g.birthPrecision==='M'?'selected':''}>M</option><option ${g.birthPrecision==='Y'?'selected':''}>Y</option></select></td>
       <td><select class="grid-select" data-field="gender"><option value=""></option><option value="M" ${g.gender==='M'?'selected':''}>Nam</option><option value="F" ${g.gender==='F'?'selected':''}>Nữ</option></select></td>
-      <td contenteditable="true" data-field="nationality">${escapeHtml(g.nationality)}</td>
+      <td contenteditable="true" data-field="nationality" class="${g.natInvalid?'nat-bad':''}">${escapeHtml(g.nationality)}</td>
       <td contenteditable="true" data-field="passport">${escapeHtml(g.passport)}</td>
       <td contenteditable="true" data-field="room">${escapeHtml(g.room)}</td>
       <td contenteditable="true" data-field="arrival">${escapeHtml(g.arrival)}</td>
@@ -231,6 +267,17 @@ function renderDetails(){
   if(g&&g.preview){ if(empty)empty.hidden=true; if(inlineViewer)inlineViewer.load(g.preview); }
   else { if(empty)empty.hidden=false; if(inlineViewer)inlineViewer.load(''); }
   if(cropMode) cancelCrop();
+  const natEl=document.querySelector('#detailForm input[data-field="nationality"]');
+  if(natEl) natEl.classList.toggle('invalid', !!(g&&g.natInvalid));
+  const hint=$('natHint');
+  if(hint){
+    if(g&&g.natNote){ hint.hidden=false; hint.className='nat-hint warn'; hint.textContent=g.natNote; }
+    else if(g&&g.natInvalid){
+      hint.hidden=false; hint.className='nat-hint bad';
+      const chips=(g.natCandidates||[]).map(c=>`<button type="button" class="nat-cand" data-code="${c}">${c} — ${escapeHtml(countryByCode.get(c)||'')}</button>`).join('');
+      hint.innerHTML=`Mã <b>${escapeHtml(g.nationality)}</b> không có trong danh sách. ${chips?'Chọn mã đúng: '+chips:'Nhập mã hợp lệ ở ô trên.'}`;
+    } else { hint.hidden=true; hint.innerHTML=''; }
+  }
   $('reasonBox').textContent=g?.reasons?.length?`Cần kiểm tra: ${g.reasons.join('; ')}`:'';
 }
 function renderCounters(){
@@ -246,7 +293,7 @@ function updateGuestField(g,field,value){
   else if(field==='birthDate'){ const d=parseDateValue(value,true); g.birthDate=d.value; if(d.precision) g.birthPrecision=d.precision; }
   else if(field==='birthPrecision') g[field]=String(value).charAt(0).toUpperCase();
   else if(field==='gender') g[field]=normalizeGender(value);
-  else if(field==='nationality') g[field]=normalizeNationality(value);
+  else if(field==='nationality'){ g.nationality=normalizeNationality(value); g.natNote=''; }
   else if(field==='passport') g[field]=normalizePassport(value);
   else if(field==='room') g[field]=normalizeRoom(value);
   else if(['arrival','departure','checkout'].includes(field)) g[field]=parseDateValue(value,false).value;
@@ -563,6 +610,12 @@ function isBlankOrArrivalOnly(g){
 function exportableRows(){ return guests.filter(g=>g.selected&&g.status!=='excluded'&&(!settings.skipBlankArrivalOnly||!isBlankOrArrivalOnly(g))); }
 async function confirmExport(rows){
   if(!rows.length){ showError('Chưa chọn dòng khách nước ngoài nào để xuất.'); return false; }
+  // Hard block: no export while any selected row has an invalid nationality code.
+  const badNat=rows.filter(g=>g.nationality && countryByCode.size && !countryByCode.has(g.nationality));
+  if(badNat.length){
+    showModal('Không thể xuất',`<div class="warning-box">Còn <b>${badNat.length}</b> dòng có <b>mã quốc tịch không hợp lệ</b> (không có trong danh sách mã của file mẫu). Hãy sửa (chọn mã gần đúng trong khung chi tiết) trước khi xuất.</div><ul>${badNat.map(g=>`<li>${escapeHtml(g.fullName||'(chưa có tên)')}: <b>${escapeHtml(g.nationality)}</b></li>`).join('')}</ul>`);
+    return false;
+  }
   const incomplete=rows.filter(g=>g.status!=='ok');
   if(incomplete.length){
     return await askConfirm('Xuất dữ liệu còn thiếu',`<div class="warning-box">Có <b>${incomplete.length}</b> / <b>${rows.length}</b> dòng còn thiếu hoặc cần kiểm tra. App vẫn xuất toàn bộ các dòng đã chọn và giữ trống dữ liệu chưa có để anh chỉnh sau.</div><p>Khách Việt Nam luôn được loại khỏi file.</p>`,'Vẫn xuất');
@@ -753,6 +806,8 @@ function initDetailPane(){
   window.addEventListener('mouseup',()=>{ cropDrag=null; });
   $('cropRead').onclick=readCroppedRegion;
   $('cropCancel').onclick=cancelCrop;
+  // Pick a suggested nationality code (red "invalid" state)
+  $('natHint').addEventListener('click',e=>{ const b=e.target.closest('.nat-cand'); if(!b)return; const g=findGuest(activeId); if(!g)return; g.nationality=b.dataset.code; g.natNote=''; validateAll(); renderAll(); });
   // Action buttons
   $('saveNextBtn').onclick=saveNext;
   $('rereadBtn').onclick=rereadMrz;
