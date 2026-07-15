@@ -7,6 +7,16 @@
 # Per-user AI config (contains the Anthropic API key) — never commit
 config.json
 
+# Code-signing secrets — never commit certificates or passwords
+*.pfx
+*.p12
+*.pvk
+*.cer
+*.crt
+*.key
+signing.env
+*.secret
+
 # OS / editor
 .DS_Store
 *.log
