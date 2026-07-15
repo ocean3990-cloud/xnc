@@ -55,6 +55,12 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 Write-Host "Phiên bản: $Version"
 
+# --- Kiểm tra điều kiện ký TRƯỚC khi build (fail nhanh, tránh tạo file chưa ký) ---
+$doSign = -not $SkipSign
+if ($doSign -and (-not $env:XNC_PFX_PATH -or -not $env:XNC_PFX_PASSWORD)) {
+    Fail 'Thiếu biến môi trường để ký: cần cả XNC_PFX_PATH và XNC_PFX_PASSWORD. Hãy đặt hai biến này, hoặc chạy lại với -SkipSign để build bản chưa ký (dev).'
+}
+
 # --- Chuẩn bị thư mục xuất -------------------------------------------------
 if (-not [System.IO.Path]::IsPathRooted($OutDir)) { $OutDir = Join-Path $root $OutDir }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -70,11 +76,6 @@ $env:CGO_ENABLED = '0'
 if ($LASTEXITCODE -ne 0) { Fail "go build thất bại (exit $LASTEXITCODE)." }
 
 # --- Ký --------------------------------------------------------------------
-$doSign = -not $SkipSign
-if ($doSign -and (-not $env:XNC_PFX_PATH -or -not $env:XNC_PFX_PASSWORD)) {
-    Write-Warning 'Chưa đặt XNC_PFX_PATH/XNC_PFX_PASSWORD — bỏ qua bước ký (file sẽ chưa được ký).'
-    $doSign = $false
-}
 if ($doSign) {
     $signScript = Join-Path $root 'sign-release.ps1'
     if (-not (Test-Path -LiteralPath $signScript)) { Fail "Không tìm thấy sign-release.ps1 ở $root." }
@@ -83,7 +84,7 @@ if ($doSign) {
     & $signScript @signArgs
     if ($LASTEXITCODE -ne 0) { Fail "Ký thất bại (sign-release.ps1 exit $LASTEXITCODE)." }
 } else {
-    Write-Host 'Ký     : (bỏ qua)'
+    Write-Host 'Ký     : (bỏ qua theo -SkipSign)'
 }
 
 # --- SHA256 của file cuối cùng --------------------------------------------
