@@ -3,18 +3,17 @@
 Ứng dụng khai báo tạm trú cho khách nước ngoài (Windows, WebView2). Đọc dữ liệu
 khách từ Excel/Word/PDF/ảnh bảng và **ảnh hộ chiếu**, rồi xuất XML/Excel.
 
-## Đọc hộ chiếu chính xác
+## Đọc hộ chiếu chính xác (100% offline)
 
-Có hai đường bổ trợ nhau (mặc định vẫn chạy OCR nội bộ như trước nếu không cấu hình gì):
+> Bản này **tạm gỡ AI Vision** để chạy hoàn toàn offline, không gửi dữ liệu ra
+> ngoài. (Đường AI đã làm trước đó vẫn nằm trong lịch sử git, khôi phục sau khi cần.)
 
-- **AI thị giác** (cần internet + Anthropic API key): mở **Cài đặt → Đọc chính xác
-  bằng AI**, nhập key `sk-ant-...`. Key lưu tại `%LOCALAPPDATA%\XNC Ocean\config.json`
-  hoặc biến môi trường `ANTHROPIC_API_KEY` — **không đưa vào mã nguồn**.
-- **Offline — model MRZ**: cài Tesseract-OCR và đặt `mrz.traineddata` (hoặc
+- **Model MRZ**: cài Tesseract-OCR và đặt `mrz.traineddata` (hoặc
   `ocrb.traineddata` / `ocrb_int.traineddata`) vào thư mục `tessdata`
   (`C:\Program Files\Tesseract-OCR\tessdata` hoặc `%LOCALAPPDATA%\XNC Ocean\tessdata`).
   App tự dùng model chuyên font OCR-B cho dòng MRZ; kết hợp kiểm tra checksum để
   đọc số hộ chiếu/ngày sinh chính xác mà vẫn 100% offline.
+- Không có model → vẫn chạy được bằng Tesseract `eng` / Windows OCR như bản gốc.
 
 ## Build
 

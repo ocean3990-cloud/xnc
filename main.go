@@ -111,8 +111,6 @@ func (s *appServer) routes(mux *http.ServeMux) {
 		writeJSON(w, map[string]any{"countries": map[string]string{}})
 	})
 	mux.HandleFunc("/api/import", s.handleImport)
-	mux.HandleFunc("/api/config", s.handleConfig)
-	mux.HandleFunc("/api/ai/test", s.handleAITest)
 	mux.HandleFunc("/api/export/excel", s.handleExportExcel)
 	mux.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
@@ -196,69 +194,6 @@ func (s *appServer) handleImport(w http.ResponseWriter, r *http.Request) {
 		normalizeGuest(&recs[i])
 	}
 	writeJSON(w, ImportResult{Records: recs, Warning: warn})
-}
-
-// handleConfig reports and updates the AI configuration. The API key is never
-// returned to the UI — only whether one is present and where it came from.
-func (s *appServer) handleConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		source := ""
-		if apiKeySourceFromEnv() {
-			source = "env"
-		} else if strings.TrimSpace(loadConfig().APIKey) != "" {
-			source = "config"
-		}
-		writeJSON(w, map[string]any{
-			"enabled":    aiEnabled(),
-			"hasKey":     aiAPIKey() != "",
-			"source":     source,
-			"envManaged": apiKeySourceFromEnv(),
-			"model":      aiModel(),
-		})
-	case http.MethodPost:
-		var req struct {
-			APIKey string `json:"apiKey"`
-			Model  string `json:"model"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			writeErr(w, 400, "Dữ liệu không hợp lệ")
-			return
-		}
-		cfg := loadConfig()
-		// An empty apiKey field means "leave the stored key unchanged"; users clear
-		// it explicitly by sending the sentinel "-".
-		if strings.TrimSpace(req.APIKey) == "-" {
-			cfg.APIKey = ""
-		} else if strings.TrimSpace(req.APIKey) != "" {
-			cfg.APIKey = strings.TrimSpace(req.APIKey)
-		}
-		cfg.Model = strings.TrimSpace(req.Model)
-		if err := saveConfig(cfg); err != nil {
-			writeErr(w, 500, "Không lưu được cấu hình: "+err.Error())
-			return
-		}
-		writeJSON(w, map[string]any{"ok": true, "enabled": aiEnabled(), "model": aiModel(), "envManaged": apiKeySourceFromEnv()})
-	default:
-		http.Error(w, "method", 405)
-	}
-}
-
-// handleAITest verifies the key + connectivity with a tiny text-only request.
-func (s *appServer) handleAITest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method", 405)
-		return
-	}
-	if !aiEnabled() {
-		writeJSON(w, map[string]any{"ok": false, "error": "Chưa có API key"})
-		return
-	}
-	if _, err := aiComplete("", "Reply with the single word OK.", "", "", 16); err != nil {
-		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true, "model": aiModel()})
 }
 
 func (s *appServer) handleExportExcel(w http.ResponseWriter, r *http.Request) {
@@ -892,15 +827,6 @@ func readPDF(path, tempDir string) ([]Guest, string, error) {
 	return dedupeGuests(recs), warn, nil
 }
 func readTableImage(path, tempDir string) ([]Guest, string, error) {
-	// Prefer the vision model for table/rooming-list photos; fall back to OCR.
-	if aiEnabled() {
-		recs, warn, err := extractTableAI(path)
-		if err != nil {
-			log.Printf("AI table failed, dùng OCR nội bộ: %v", err)
-		} else if len(recs) > 0 {
-			return dedupeGuests(recs), warn, nil
-		}
-	}
 	txt, err := ocrImage(path, tempDir, false)
 	if err != nil {
 		return nil, "", err
@@ -914,17 +840,6 @@ func readTableImage(path, tempDir string) ([]Guest, string, error) {
 }
 
 func readPassport(path, tempDir string) ([]Guest, string, error) {
-	// Preferred path: read the passport with the vision model, which is far more
-	// accurate on real phone photos than local OCR-B recognition. Falls through to
-	// the offline OCR pipeline below when no API key is set or the call fails.
-	if aiEnabled() {
-		g, warn, err := extractPassportAI(path)
-		if err != nil {
-			log.Printf("AI passport failed, dùng OCR nội bộ: %v", err)
-		} else if guestHasData(g) {
-			return []Guest{g}, warn, nil
-		}
-	}
 	txt, err := ocrPassport(path, tempDir)
 	if err != nil {
 		return nil, "", err
