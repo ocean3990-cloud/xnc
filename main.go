@@ -111,6 +111,8 @@ func (s *appServer) routes(mux *http.ServeMux) {
 		writeJSON(w, map[string]any{"countries": map[string]string{}})
 	})
 	mux.HandleFunc("/api/import", s.handleImport)
+	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/ai/test", s.handleAITest)
 	mux.HandleFunc("/api/export/excel", s.handleExportExcel)
 	mux.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
@@ -194,6 +196,69 @@ func (s *appServer) handleImport(w http.ResponseWriter, r *http.Request) {
 		normalizeGuest(&recs[i])
 	}
 	writeJSON(w, ImportResult{Records: recs, Warning: warn})
+}
+
+// handleConfig reports and updates the AI configuration. The API key is never
+// returned to the UI — only whether one is present and where it came from.
+func (s *appServer) handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		source := ""
+		if apiKeySourceFromEnv() {
+			source = "env"
+		} else if strings.TrimSpace(loadConfig().APIKey) != "" {
+			source = "config"
+		}
+		writeJSON(w, map[string]any{
+			"enabled":    aiEnabled(),
+			"hasKey":     aiAPIKey() != "",
+			"source":     source,
+			"envManaged": apiKeySourceFromEnv(),
+			"model":      aiModel(),
+		})
+	case http.MethodPost:
+		var req struct {
+			APIKey string `json:"apiKey"`
+			Model  string `json:"model"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			writeErr(w, 400, "Dữ liệu không hợp lệ")
+			return
+		}
+		cfg := loadConfig()
+		// An empty apiKey field means "leave the stored key unchanged"; users clear
+		// it explicitly by sending the sentinel "-".
+		if strings.TrimSpace(req.APIKey) == "-" {
+			cfg.APIKey = ""
+		} else if strings.TrimSpace(req.APIKey) != "" {
+			cfg.APIKey = strings.TrimSpace(req.APIKey)
+		}
+		cfg.Model = strings.TrimSpace(req.Model)
+		if err := saveConfig(cfg); err != nil {
+			writeErr(w, 500, "Không lưu được cấu hình: "+err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "enabled": aiEnabled(), "model": aiModel(), "envManaged": apiKeySourceFromEnv()})
+	default:
+		http.Error(w, "method", 405)
+	}
+}
+
+// handleAITest verifies the key + connectivity with a tiny text-only request.
+func (s *appServer) handleAITest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", 405)
+		return
+	}
+	if !aiEnabled() {
+		writeJSON(w, map[string]any{"ok": false, "error": "Chưa có API key"})
+		return
+	}
+	if _, err := aiComplete("", "Reply with the single word OK.", "", "", 16); err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "model": aiModel()})
 }
 
 func (s *appServer) handleExportExcel(w http.ResponseWriter, r *http.Request) {
@@ -827,6 +892,15 @@ func readPDF(path, tempDir string) ([]Guest, string, error) {
 	return dedupeGuests(recs), warn, nil
 }
 func readTableImage(path, tempDir string) ([]Guest, string, error) {
+	// Prefer the vision model for table/rooming-list photos; fall back to OCR.
+	if aiEnabled() {
+		recs, warn, err := extractTableAI(path)
+		if err != nil {
+			log.Printf("AI table failed, dùng OCR nội bộ: %v", err)
+		} else if len(recs) > 0 {
+			return dedupeGuests(recs), warn, nil
+		}
+	}
 	txt, err := ocrImage(path, tempDir, false)
 	if err != nil {
 		return nil, "", err
@@ -840,6 +914,17 @@ func readTableImage(path, tempDir string) ([]Guest, string, error) {
 }
 
 func readPassport(path, tempDir string) ([]Guest, string, error) {
+	// Preferred path: read the passport with the vision model, which is far more
+	// accurate on real phone photos than local OCR-B recognition. Falls through to
+	// the offline OCR pipeline below when no API key is set or the call fails.
+	if aiEnabled() {
+		g, warn, err := extractPassportAI(path)
+		if err != nil {
+			log.Printf("AI passport failed, dùng OCR nội bộ: %v", err)
+		} else if guestHasData(g) {
+			return []Guest{g}, warn, nil
+		}
+	}
 	txt, err := ocrPassport(path, tempDir)
 	if err != nil {
 		return nil, "", err
@@ -849,6 +934,8 @@ func readPassport(path, tempDir string) ([]Guest, string, error) {
 	noTess := ""
 	if tesseractPath() == "" {
 		noTess = " [Máy chưa dùng được Tesseract — MRZ đang do Windows OCR đọc nên dễ sai; hãy cài Tesseract-OCR vào C:\\Program Files\\Tesseract-OCR rồi mở lại app.]"
+	} else if _, _, ok := mrzOCR(); !ok {
+		noTess = " [Để đọc MRZ chính xác hơn khi offline, hãy đặt file mrz.traineddata (hoặc ocrb.traineddata) vào thư mục tessdata của Tesseract rồi mở lại app.]"
 	}
 	if g, ok := parseMRZ(txt); ok {
 		warn := ""
@@ -1215,6 +1302,71 @@ func tesseractPath() string {
 
 var tessMu sync.Mutex
 
+// mrzOCR reports the Tesseract language to use for the machine-readable zone. It
+// prefers a dedicated OCR-B model (mrz.traineddata / ocrb.traineddata) dropped
+// into any tessdata folder we know about; when none is present it returns
+// ("eng","",false) and the caller keeps the previous generic-English behavior.
+// Only a positive result is cached, so dropping the model in mid-session is
+// picked up on the next passport read without restarting.
+var (
+	mrzMu        sync.Mutex
+	mrzLangCache string
+	mrzDirCache  string
+	mrzHave      bool
+)
+
+func mrzOCR() (string, string, bool) {
+	mrzMu.Lock()
+	defer mrzMu.Unlock()
+	if mrzHave {
+		return mrzLangCache, mrzDirCache, true
+	}
+	l, d, ok := findMRZLangIn(mrzTessdataDirs())
+	if ok {
+		mrzLangCache, mrzDirCache, mrzHave = l, d, true
+	}
+	return l, d, ok
+}
+
+// mrzTessdataDirs lists the tessdata folders to search for an MRZ model, in
+// priority order. %LOCALAPPDATA%\XNC Ocean\tessdata lets a user add the model
+// without write access to Program Files.
+func mrzTessdataDirs() []string {
+	var dirs []string
+	if p := os.Getenv("TESSDATA_PREFIX"); p != "" {
+		dirs = append(dirs, p, filepath.Join(p, "tessdata"))
+	}
+	if tess := tesseractPath(); tess != "" {
+		dirs = append(dirs, filepath.Join(filepath.Dir(tess), "tessdata"))
+	}
+	if la := os.Getenv("LOCALAPPDATA"); la != "" {
+		dirs = append(dirs, filepath.Join(la, "XNC Ocean", "tessdata"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "tessdata"))
+	}
+	return dirs
+}
+
+// findMRZLangIn returns the first MRZ/OCR-B model found among dirs as
+// (langName, tessdataDir, true). The langName matches the traineddata basename
+// so it can be passed straight to Tesseract's -l flag.
+func findMRZLangIn(dirs []string) (string, string, bool) {
+	seen := map[string]bool{}
+	for _, d := range dirs {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		for _, name := range []string{"mrz", "MRZ", "ocrb", "OCRB", "OCR-B", "ocrb_int"} {
+			if _, err := os.Stat(filepath.Join(d, name+".traineddata")); err == nil {
+				return name, d, true
+			}
+		}
+	}
+	return "eng", "", false
+}
+
 // grayBand extracts rect from src as a contrast-stretched grayscale image. Working
 // in Go removes the dependency on the PowerShell/System.Drawing preprocessing that
 // silently fails on some machines and starves Tesseract of a clean MRZ crop.
@@ -1368,7 +1520,26 @@ func runTesseract(tess, path, tempDir, psm string, mrz bool) string {
 	// --oem 1 (LSTM) and an explicit --dpi avoid the slower legacy path and the
 	// per-run resolution guess. For MRZ crops we also drop the dictionaries and the
 	// inverted retry pass: the MRZ is a fixed OCR-B code.
-	args := []string{path, base, "-l", "eng", "--psm", psm, "--oem", "1", "--dpi", "300"}
+	lang, oem := "eng", "1"
+	args := []string{path, base}
+	if mrz {
+		// The machine-readable zone is OCR-B, a font the generic English model reads
+		// poorly. When a dedicated MRZ/OCR-B model is installed (mrz.traineddata or
+		// ocrb.traineddata in a tessdata folder), use it — this is what lets the MRZ
+		// read accurately fully offline, the way a real passport reader does. The
+		// model may be legacy-trained, so let Tesseract auto-pick the engine (--oem).
+		if l, dir, ok := mrzOCR(); ok {
+			lang = l
+			oem = ""
+			if dir != "" {
+				args = append(args, "--tessdata-dir", dir)
+			}
+		}
+	}
+	args = append(args, "-l", lang, "--psm", psm, "--dpi", "300")
+	if oem != "" {
+		args = append(args, "--oem", oem)
+	}
 	if mrz {
 		args = append(args,
 			"-c", "tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",

@@ -612,6 +612,74 @@ async function processFiles(files,mode='auto'){
   }
 }
 
+async function fetchAIConfig(){
+  try{ return await (await fetch('/api/config',{cache:'no-store'})).json(); }
+  catch{ return {enabled:false,hasKey:false,source:'',model:'',envManaged:false}; }
+}
+function aiStatusHtml(cfg){
+  if(cfg.envManaged) return `<span class="ok">● Đang bật — key lấy từ biến môi trường ANTHROPIC_API_KEY (model ${escapeHtml(cfg.model||'')})</span>`;
+  if(cfg.hasKey) return `<span class="ok">● Đang bật — đọc hộ chiếu/bảng bằng AI (model ${escapeHtml(cfg.model||'')})</span>`;
+  return `<span class="warn">▲ Chưa bật — đang dùng OCR nội bộ (Tesseract/Windows). Nhập API key để đọc chính xác bằng AI.</span>`;
+}
+async function openSettings(){
+  const cfg=await fetchAIConfig();
+  const privacy=cfg.hasKey
+    ? 'Khi bật AI, <b>ảnh hộ chiếu/ảnh bảng được gửi lên Anthropic để đọc</b> rồi trả về kết quả. Các dữ liệu khác xử lý trên máy.'
+    : 'Dữ liệu được xử lý trực tiếp trên máy, không tải lên máy chủ.';
+  showModal('Cài đặt',`<div class="help-list">
+    <label><input type="checkbox" id="setUpper" ${settings.autoUppercase?'checked':''}> Tự chuyển họ tên thành chữ in hoa</label><br>
+    <label><input type="checkbox" id="setCopy" ${settings.copyDepartureToCheckout?'checked':''}> Khi thiếu, dùng Ngày đi dự kiến làm Ngày trả phòng</label><br>
+    <label><input type="checkbox" id="setVie" ${settings.ocrVietnamese?'checked':''}> OCR cả tiêu đề tiếng Việt (khuyến nghị)</label><br>
+    <label><input type="checkbox" id="setSkipBlank" ${settings.skipBlankArrivalOnly?'checked':''}> Tự bỏ qua dòng trống hoặc chỉ có Ngày đến khi xuất</label>
+    <hr>
+    <b>🤖 Đọc chính xác bằng AI (Anthropic)</b>
+    <p style="margin:4px 0" id="aiStatus">${aiStatusHtml(cfg)}</p>
+    <p style="margin:4px 0"><small>Đọc đúng tên, ngày sinh, số hộ chiếu trên ảnh chụp điện thoại — chính xác như khi gửi ảnh cho Claude. Cần internet và Anthropic API key (dạng <code>sk-ant-...</code>). Key lưu trên máy này, không đưa vào file cài đặt xuất ra ngoài.</small></p>
+    ${cfg.envManaged?'<p><small>Đang dùng key từ biến môi trường; ô dưới sẽ bị bỏ qua.</small></p>':''}
+    <label>API key<input type="password" id="aiKey" placeholder="${cfg.hasKey?'•••••••• (đã lưu — để trống nếu giữ nguyên)':'sk-ant-...'}" autocomplete="off"></label>
+    <label>Model (tuỳ chọn)<input type="text" id="aiModel" value="${escapeHtml(cfg.model||'')}" placeholder="claude-opus-4-8"></label>
+    <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+      <button id="aiSave">Lưu</button>
+      <button id="aiTest">Kiểm tra kết nối</button>
+      ${cfg.hasKey&&!cfg.envManaged?'<button id="aiClear">Xoá key</button>':''}
+    </div>
+    <p style="margin:6px 0" id="aiMsg"></p>
+    <hr>
+    <div class="about-box"><img src="./assets/logo.svg"><div><b>XNC - Khai báo tạm trú khách nước ngoài</b><br>Version 1.0.14<br>Developed by Ocean<br>© 2026 Ocean<br><small>${privacy}</small></div></div>
+  </div>`);
+  setTimeout(()=>{
+    $('setUpper').onchange=e=>{settings.autoUppercase=e.target.checked;saveSettings()};
+    $('setCopy').onchange=e=>{settings.copyDepartureToCheckout=e.target.checked;saveSettings()};
+    $('setVie').onchange=e=>{settings.ocrVietnamese=e.target.checked;saveSettings();};
+    $('setSkipBlank').onchange=e=>{settings.skipBlankArrivalOnly=e.target.checked;saveSettings();};
+    const msg=(t,cls='')=>{const m=$('aiMsg');if(m){m.className=cls;m.innerHTML=t;}};
+    async function postConfig(body){
+      const res=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const d=await res.json().catch(()=>({})); if(!res.ok) throw new Error(d.error||'Lỗi lưu cấu hình'); return d;
+    }
+    if($('aiSave'))$('aiSave').onclick=async()=>{
+      try{ msg('Đang lưu…');
+        const d=await postConfig({apiKey:$('aiKey').value,model:$('aiModel').value});
+        const c=await fetchAIConfig(); $('aiStatus').innerHTML=aiStatusHtml(c);
+        msg(d.enabled?'<span class="ok">Đã lưu. AI đang bật.</span>':'<span class="warn">Đã lưu nhưng chưa có key.</span>');
+        $('aiKey').value='';
+      }catch(e){ msg(`<span class="bad">${escapeHtml(e.message)}</span>`); }
+    };
+    if($('aiTest'))$('aiTest').onclick=async()=>{
+      try{ msg('Đang kiểm tra kết nối…');
+        // Save any freshly typed key first so the test uses it.
+        if($('aiKey').value.trim()) await postConfig({apiKey:$('aiKey').value,model:$('aiModel').value});
+        const res=await fetch('/api/ai/test',{method:'POST'}); const d=await res.json();
+        if(d.ok){ msg(`<span class="ok">Kết nối OK (model ${escapeHtml(d.model||'')}).</span>`); const c=await fetchAIConfig(); $('aiStatus').innerHTML=aiStatusHtml(c); $('aiKey').value=''; }
+        else msg(`<span class="bad">${escapeHtml(d.error||'Không kết nối được')}</span>`);
+      }catch(e){ msg(`<span class="bad">${escapeHtml(e.message)}</span>`); }
+    };
+    if($('aiClear'))$('aiClear').onclick=async()=>{
+      try{ await postConfig({apiKey:'-',model:$('aiModel').value}); const c=await fetchAIConfig(); $('aiStatus').innerHTML=aiStatusHtml(c); msg('<span class="warn">Đã xoá key. Quay lại OCR nội bộ.</span>'); }
+      catch(e){ msg(`<span class="bad">${escapeHtml(e.message)}</span>`); }
+    };
+  },0);
+}
 function bindEvents(){
   const modeByInput={generalInput:'auto',passportInput:'passport',tableImageInput:'table-image',pdfInput:'pdf',excelInput:'excel',wordInput:'word'};
   document.querySelectorAll('[data-input]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.input).click()));
@@ -635,8 +703,8 @@ function bindEvents(){
   $('searchInput').oninput=e=>{currentSearch=e.target.value;renderTable();};
   detailInputs.forEach(el=>el.addEventListener(el.type==='checkbox'||el.tagName==='SELECT'?'change':'input',()=>{const g=findGuest(activeId);if(!g)return;updateGuestField(g,el.dataset.field,el.type==='checkbox'?el.checked:el.value);validateAll();renderTable();renderCounters();$('reasonBox').textContent=g.reasons.length?`Cần kiểm tra: ${g.reasons.join('; ')}`:'';}));
   $('exportXmlBtn').onclick=exportXml;$('exportExcelBtn').onclick=exportExcel;
-  $('helpBtn').onclick=()=>showModal('Hướng dẫn sử dụng',`<div class="help-list"><b>1. Thêm dữ liệu</b><br>• Excel: tự nhận diện dòng tiêu đề và ánh xạ cột.<br>• Word: đọc trực tiếp bảng/văn bản; nếu file có ảnh scan, app trích ảnh và OCR.<br>• PDF/ảnh bảng: nhận diện từng dòng khách bằng OCR.<br>• Ảnh hộ chiếu: dò trên ảnh nhỏ, dựng thẳng ảnh gốc, OCR 3 vùng và kiểm tra checksum MRZ; mỗi ảnh tạo đúng một khách.<br>• Dán ảnh hộ chiếu: bấm nút “📋 Dán ảnh hộ chiếu” hoặc nhấn Ctrl+V ở bất kỳ đâu; ảnh chỉ giữ tạm trong bộ nhớ, mỗi lần dán tạo một khách.<br><br><b>2. Kiểm tra</b><br>Ô thiếu hoặc sai được đánh dấu “Cần kiểm tra”. Mã VNM tự bị loại. Có thể sửa trực tiếp trên bảng hoặc khung bên phải.<br><br><b>3. Xuất</b><br>Chọn các dòng cần dùng, sau đó Xuất XML hoặc Xuất Excel. Các dòng còn thiếu vẫn có thể xuất để chỉnh sau; app sẽ cảnh báo trước khi tạo file.<br><br><b>Mẹo</b><br>Ảnh bảng nên chụp thẳng, đủ sáng; ảnh hộ chiếu cần thấy rõ hai dòng MRZ phía dưới.</div>`);
-  $('settingsBtn').onclick=()=>{showModal('Cài đặt',`<div class="help-list"><label><input type="checkbox" id="setUpper" ${settings.autoUppercase?'checked':''}> Tự chuyển họ tên thành chữ in hoa</label><br><label><input type="checkbox" id="setCopy" ${settings.copyDepartureToCheckout?'checked':''}> Khi thiếu, dùng Ngày đi dự kiến làm Ngày trả phòng</label><br><label><input type="checkbox" id="setVie" ${settings.ocrVietnamese?'checked':''}> OCR cả tiêu đề tiếng Việt (khuyến nghị)</label><br><label><input type="checkbox" id="setSkipBlank" ${settings.skipBlankArrivalOnly?'checked':''}> Tự bỏ qua dòng trống hoặc chỉ có Ngày đến khi xuất</label><hr><div class="about-box"><img src="./assets/logo.svg"><div><b>XNC - Khai báo tạm trú khách nước ngoài</b><br>Version 1.0.14<br>Developed by Ocean<br>© 2026 Ocean<br><small>Dữ liệu được xử lý trực tiếp trên máy, không tải lên máy chủ.</small></div></div>`);setTimeout(()=>{$('setUpper').onchange=e=>{settings.autoUppercase=e.target.checked;saveSettings()};$('setCopy').onchange=e=>{settings.copyDepartureToCheckout=e.target.checked;saveSettings()};$('setVie').onchange=e=>{settings.ocrVietnamese=e.target.checked;saveSettings();};$('setSkipBlank').onchange=e=>{settings.skipBlankArrivalOnly=e.target.checked;saveSettings();};},0);};
+  $('helpBtn').onclick=()=>showModal('Hướng dẫn sử dụng',`<div class="help-list"><b>1. Thêm dữ liệu</b><br>• Excel: tự nhận diện dòng tiêu đề và ánh xạ cột.<br>• Word: đọc trực tiếp bảng/văn bản; nếu file có ảnh scan, app trích ảnh và OCR.<br>• PDF/ảnh bảng: nhận diện từng dòng khách bằng OCR.<br>• Ảnh hộ chiếu: dò trên ảnh nhỏ, dựng thẳng ảnh gốc, OCR 3 vùng và kiểm tra checksum MRZ; mỗi ảnh tạo đúng một khách.<br>• Đọc chính xác hơn: bật AI trong Cài đặt (cần internet + API key), HOẶC để offline thì cài Tesseract-OCR và đặt file <code>mrz.traineddata</code> (hoặc <code>ocrb.traineddata</code>) vào thư mục <code>tessdata</code> — MRZ sẽ đọc bằng model chuyên font OCR-B như máy đọc hộ chiếu.<br>• Dán ảnh hộ chiếu: bấm nút “📋 Dán ảnh hộ chiếu” hoặc nhấn Ctrl+V ở bất kỳ đâu; ảnh chỉ giữ tạm trong bộ nhớ, mỗi lần dán tạo một khách.<br><br><b>2. Kiểm tra</b><br>Ô thiếu hoặc sai được đánh dấu “Cần kiểm tra”. Mã VNM tự bị loại. Có thể sửa trực tiếp trên bảng hoặc khung bên phải.<br><br><b>3. Xuất</b><br>Chọn các dòng cần dùng, sau đó Xuất XML hoặc Xuất Excel. Các dòng còn thiếu vẫn có thể xuất để chỉnh sau; app sẽ cảnh báo trước khi tạo file.<br><br><b>Mẹo</b><br>Ảnh bảng nên chụp thẳng, đủ sáng; ảnh hộ chiếu cần thấy rõ hai dòng MRZ phía dưới.</div>`);
+  $('settingsBtn').onclick=openSettings;
   $('modalClose').onclick=closeModal;$('modal').addEventListener('click',e=>{if(e.target===$('modal'))closeModal()});
   document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='f'){e.preventDefault();$('searchInput').focus()}if(e.ctrlKey&&e.key.toLowerCase()==='o'){e.preventDefault();$('generalInput').click()}if(e.key==='Escape')closeModal();});
   window.addEventListener('beforeunload',()=>{try{navigator.sendBeacon('/api/shutdown','1')}catch{}});

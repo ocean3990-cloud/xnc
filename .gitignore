@@ -1,0 +1,12 @@
+# Build artifacts
+*.exe
+*.exe~
+/xnc_ocean108
+/dist/
+
+# Per-user AI config (contains the Anthropic API key) — never commit
+config.json
+
+# OS / editor
+.DS_Store
+*.log
