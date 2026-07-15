@@ -94,17 +94,43 @@
       </section>
     </section>
 
-    <aside class="detail-pane">
-      <div class="detail-title">Thông tin chi tiết <span>⌃</span></div>
-      <div class="preview-box" id="previewBox">
-        <div class="preview-placeholder">Không có ảnh nguồn</div>
+    <div class="splitter" id="splitter" title="Kéo để thay đổi kích thước"></div>
+
+    <aside class="detail-pane" id="detailPane">
+      <div class="detail-title"><span>Thông tin chi tiết</span>
+        <button id="fullscreenBtn" class="mini-btn" title="Toàn màn hình (F11)">⛶</button>
       </div>
+
+      <div class="viewer" id="viewer">
+        <div class="viewer-toolbar">
+          <button data-vz="fit" title="Vừa khung">Fit</button>
+          <button data-vz="z100" title="Kích thước 100%">100%</button>
+          <button data-vz="z200" title="Kích thước 200%">200%</button>
+          <button data-vz="mrz" title="Phóng vùng MRZ">MRZ</button>
+          <button data-vz="rotl" title="Xoay trái">⟲</button>
+          <button data-vz="rotr" title="Xoay phải">⟳</button>
+          <button data-vz="big" title="Xem lớn (nhấp đúp ảnh)">🔍 Xem lớn</button>
+          <button data-vz="crop" title="Cắt MRZ thủ công">✂ Cắt MRZ</button>
+        </div>
+        <div class="viewer-stage" id="viewerStage">
+          <img id="viewerImg" alt="Ảnh hộ chiếu" draggable="false" hidden>
+          <div class="viewer-empty" id="viewerEmpty">Không có ảnh nguồn</div>
+          <div class="crop-box" id="cropBox" hidden></div>
+        </div>
+        <div class="crop-bar" id="cropBar" hidden>
+          <span>Kéo chọn đúng 2 dòng MRZ</span>
+          <button id="cropRead" class="act primary">Đọc vùng đã chọn</button>
+          <button id="cropCancel" class="act">Hủy</button>
+        </div>
+      </div>
+
       <div class="detail-form" id="detailForm">
         <label>Họ tên<input data-field="fullName"></label>
         <label>Ngày sinh<input data-field="birthDate" placeholder="DD/MM/YYYY, MM/YYYY hoặc YYYY"></label>
         <label>Ngày sinh đúng đến<select data-field="birthPrecision"><option value="">-- Chọn --</option><option value="D">D - Ngày</option><option value="M">M - Tháng</option><option value="Y">Y - Năm</option></select></label>
         <label>Giới tính<select data-field="gender"><option value="">-- Chọn --</option><option value="M">Nam (M)</option><option value="F">Nữ (F)</option></select></label>
-        <label>Quốc tịch (MRZ)<input data-field="nationality" maxlength="3" class="nationality-input"></label>
+        <label>Quốc tịch (MRZ)<input data-field="nationality" class="nationality-input" list="natList" autocomplete="off" placeholder="Mã hoặc tên quốc gia"></label>
+        <div class="nat-hint" id="natHint" hidden></div>
         <label>Số hộ chiếu<input data-field="passport"></label>
         <label>Số phòng<input data-field="room"></label>
         <label>Ngày đến<input data-field="arrival" placeholder="DD/MM/YYYY"></label>
@@ -113,8 +139,33 @@
         <label class="review-check"><input type="checkbox" data-field="forceReview"> Đánh dấu cần kiểm tra</label>
         <div class="reason" id="reasonBox"></div>
       </div>
+
+      <div class="detail-actions">
+        <button id="saveNextBtn" class="act primary" title="Lưu và chọn khách kế tiếp (Ctrl+Enter)">Lưu &amp; khách tiếp theo</button>
+        <button id="rereadBtn" class="act" title="OCR lại ảnh gốc của khách này">Đọc lại MRZ</button>
+        <button id="markReviewedBtn" class="act" title="Bỏ đánh dấu cần kiểm tra">Đánh dấu đã kiểm tra</button>
+        <button id="deleteRowBtn" class="act danger" title="Xóa khách đang chọn">Xóa dòng</button>
+      </div>
     </aside>
   </main>
+
+  <datalist id="natList"></datalist>
+
+  <div class="bigview hidden" id="bigView">
+    <div class="bigview-toolbar">
+      <button data-bz="fit">Fit</button>
+      <button data-bz="z100">100%</button>
+      <button data-bz="z200">200%</button>
+      <button data-bz="mrz" title="Phóng vùng MRZ">MRZ</button>
+      <button data-bz="rotl" title="Xoay trái">⟲</button>
+      <button data-bz="rotr" title="Xoay phải">⟳</button>
+      <button data-bz="full" title="Toàn màn hình (F11)">⛶</button>
+      <button data-bz="close" title="Đóng (Esc)">✕ Đóng</button>
+    </div>
+    <div class="viewer-stage bigview-stage" id="bigStage">
+      <img id="bigImg" alt="Ảnh hộ chiếu" draggable="false">
+    </div>
+  </div>
 
   <footer>
     <div><span class="ready-dot"></span><span id="statusText">Sẵn sàng</span></div>

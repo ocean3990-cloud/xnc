@@ -44,6 +44,7 @@ type Guest struct {
 	BirthPrecision string `json:"birthPrecision"`
 	Gender         string `json:"gender"`
 	Nationality    string `json:"nationality"`
+	NatCross       string `json:"natCross,omitempty"`
 	Passport       string `json:"passport"`
 	Room           string `json:"room"`
 	Arrival        string `json:"arrival"`
@@ -108,7 +109,7 @@ func (s *appServer) routes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]string{"version": version}) })
 	mux.HandleFunc("/api/reference", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"countries": map[string]string{}})
+		writeJSON(w, map[string]any{"countries": nationalityCodes()})
 	})
 	mux.HandleFunc("/api/import", s.handleImport)
 	mux.HandleFunc("/api/export/excel", s.handleExportExcel)
@@ -246,6 +247,10 @@ var aliases = map[string]string{
 	"ngay den": "arrival", "ngày đến": "arrival", "arrival": "arrival", "arrival date": "arrival", "check in": "arrival", "check-in": "arrival",
 	"ngay di": "departure", "ngày đi": "departure", "ngay di du kien": "departure", "ngày đi dự kiến": "departure", "departure": "departure", "check out": "departure", "check-out": "departure",
 	"ngay tra phong": "checkout", "ngày trả phòng": "checkout", "checkout date": "checkout", "actual departure": "checkout",
+	// Chinese tour rooming lists (headers may be CJK-only).
+	"英文姓名": "fullName", "护照号": "passport", "护照号码": "passport", "护照": "passport",
+	"出生日期": "birthDate", "生日": "birthDate", "性别": "gender", "国籍": "nationality",
+	"房号": "room", "房型": "room",
 }
 
 func readSpreadsheet(path string) ([]Guest, error) {
@@ -492,10 +497,15 @@ func detectMatrixHeader(row []string) map[string][]int {
 	norm := make([]string, len(row))
 	for j, c := range row {
 		norm[j] = normalizeKey(c)
-		if f := aliases[norm[j]]; f != "" {
-			if len(m[f]) == 0 {
-				m[f] = []int{j}
-			}
+		f := aliases[norm[j]]
+		// Bilingual headers (e.g. "NAME 英文姓名", "DOB 出生日期") keep the CJK text in
+		// the normalized key and miss every alias. Fall back to the ASCII-only part so
+		// the English half of a bilingual heading still maps to a field.
+		if f == "" {
+			f = aliases[asciiKey(c)]
+		}
+		if f != "" && len(m[f]) == 0 {
+			m[f] = []int{j}
 		}
 	}
 
@@ -849,6 +859,8 @@ func readPassport(path, tempDir string) ([]Guest, string, error) {
 	noTess := ""
 	if tesseractPath() == "" {
 		noTess = " [Máy chưa dùng được Tesseract — MRZ đang do Windows OCR đọc nên dễ sai; hãy cài Tesseract-OCR vào C:\\Program Files\\Tesseract-OCR rồi mở lại app.]"
+	} else if _, _, ok := mrzOCR(); !ok {
+		noTess = " [Để đọc MRZ chính xác hơn khi offline, hãy đặt file mrz.traineddata (hoặc ocrb.traineddata) vào thư mục tessdata của Tesseract rồi mở lại app.]"
 	}
 	if g, ok := parseMRZ(txt); ok {
 		warn := ""
@@ -856,20 +868,20 @@ func readPassport(path, tempDir string) ([]Guest, string, error) {
 		// birth, nationality) yet lack the name (line-1 chevrons OCR'd as letters, or
 		// a sparse/truncated line-1) or the sex (a truncated line-2 window). Fill any
 		// missing field from the printed visual zone, which OCRs far more reliably.
-		if g.FullName == "" || nameLooksGarbled(g.FullName) || g.Gender == "" {
-			v := parsePassportVisual(txt)
-			if g.FullName == "" || nameLooksGarbled(g.FullName) {
-				if v.FullName != "" && !nameLooksGarbled(v.FullName) {
-					g.FullName = v.FullName
-				} else if nameLooksGarbled(g.FullName) {
-					g.FullName = "" // drop garbage rather than show it
-				}
-			}
-			if g.Gender == "" && v.Gender != "" {
-				g.Gender = v.Gender
-			}
-			normalizeGuest(&g)
+		// Cross-check name and sex against the printed visual zone. The MRZ name can be
+		// incomplete (a truncated line-1 leaves only the last given name, e.g. "HOANG"
+		// instead of "TRAN DIEP THI HOANG") or garbled (chevrons OCR'd as letters). The
+		// printed zone often carries the full name, so keep whichever candidate is more
+		// complete (more name parts) and not garbled.
+		v := parsePassportVisual(txt)
+		g.FullName = preferCompleteName(g.FullName, v.FullName)
+		if nameLooksGarbled(g.FullName) {
+			g.FullName = "" // drop garbage rather than show it
 		}
+		if g.Gender == "" && v.Gender != "" {
+			g.Gender = v.Gender
+		}
+		normalizeGuest(&g)
 		if g.FullName == "" {
 			warn = "Đã đọc được MRZ nhưng chưa lấy được họ tên; vui lòng nhập họ tên." + noTess
 		}
@@ -1024,9 +1036,31 @@ func nameLooksGarbled(name string) bool {
 	return false
 }
 
+// preferCompleteName picks the more complete of two candidate names. A non-garbled
+// candidate with more word tokens wins; if only one is usable it is returned; ties
+// keep the primary (MRZ) name. This recovers full names when the MRZ line-1 read is
+// truncated to a single token but the printed visual zone has the whole name.
+func preferCompleteName(primary, alt string) string {
+	p := strings.TrimSpace(primary)
+	a := strings.TrimSpace(alt)
+	pGood := p != "" && !nameLooksGarbled(p)
+	aGood := a != "" && !nameLooksGarbled(a)
+	switch {
+	case pGood && aGood:
+		if len(strings.Fields(a)) > len(strings.Fields(p)) {
+			return a
+		}
+		return p
+	case aGood:
+		return a
+	default:
+		return p // primary (may be garbled/empty; caller drops garbage)
+	}
+}
+
 func cleanName(s string) string {
 	u := strings.ToUpper(s)
-	u = regexp.MustCompile(`(?i)\b(MR|MS|MRS|MISS|T/L|DBL|TWN|TRPL|FES|FEF)\b`).ReplaceAllString(u, " ")
+	u = regexp.MustCompile(`(?i)\b(MR|MS|MRS|MISS|MSTR|MASTER|MDM|CHD|INF|T/L|DBL|TWN|TRPL|FES|FEF)\b`).ReplaceAllString(u, " ")
 	u = regexp.MustCompile(`\b[A-Z0-9]*\d[A-Z0-9]{5,}\b`).ReplaceAllString(u, " ")
 	u = strings.Join(strings.Fields(u), " ")
 	return strings.Trim(u, " /,.-")
@@ -1149,6 +1183,21 @@ func normalizeKey(s string) string {
 	}
 	return strings.Join(strings.Fields(b.String()), " ")
 }
+
+// asciiKey is normalizeKey but keeps only ASCII letters/digits, dropping CJK and
+// other scripts. It lets a bilingual header like "NAME 英文姓名" match the "name"
+// alias via its English half.
+func asciiKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte(' ')
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
 func decodeText(b []byte) string {
 	if len(b) >= 2 && b[0] == 0xff && b[1] == 0xfe {
 		r := make([]rune, 0, (len(b)-2)/2)
@@ -1215,6 +1264,71 @@ func tesseractPath() string {
 
 var tessMu sync.Mutex
 
+// mrzOCR reports the Tesseract language to use for the machine-readable zone. It
+// prefers a dedicated OCR-B model (mrz.traineddata / ocrb.traineddata) dropped
+// into any tessdata folder we know about; when none is present it returns
+// ("eng","",false) and the caller keeps the previous generic-English behavior.
+// Only a positive result is cached, so dropping the model in mid-session is
+// picked up on the next passport read without restarting.
+var (
+	mrzMu        sync.Mutex
+	mrzLangCache string
+	mrzDirCache  string
+	mrzHave      bool
+)
+
+func mrzOCR() (string, string, bool) {
+	mrzMu.Lock()
+	defer mrzMu.Unlock()
+	if mrzHave {
+		return mrzLangCache, mrzDirCache, true
+	}
+	l, d, ok := findMRZLangIn(mrzTessdataDirs())
+	if ok {
+		mrzLangCache, mrzDirCache, mrzHave = l, d, true
+	}
+	return l, d, ok
+}
+
+// mrzTessdataDirs lists the tessdata folders to search for an MRZ model, in
+// priority order. %LOCALAPPDATA%\XNC Ocean\tessdata lets a user add the model
+// without write access to Program Files.
+func mrzTessdataDirs() []string {
+	var dirs []string
+	if p := os.Getenv("TESSDATA_PREFIX"); p != "" {
+		dirs = append(dirs, p, filepath.Join(p, "tessdata"))
+	}
+	if tess := tesseractPath(); tess != "" {
+		dirs = append(dirs, filepath.Join(filepath.Dir(tess), "tessdata"))
+	}
+	if la := os.Getenv("LOCALAPPDATA"); la != "" {
+		dirs = append(dirs, filepath.Join(la, "XNC Ocean", "tessdata"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "tessdata"))
+	}
+	return dirs
+}
+
+// findMRZLangIn returns the first MRZ/OCR-B model found among dirs as
+// (langName, tessdataDir, true). The langName matches the traineddata basename
+// so it can be passed straight to Tesseract's -l flag.
+func findMRZLangIn(dirs []string) (string, string, bool) {
+	seen := map[string]bool{}
+	for _, d := range dirs {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		for _, name := range []string{"mrz", "MRZ", "ocrb", "OCRB", "OCR-B", "ocrb_int"} {
+			if _, err := os.Stat(filepath.Join(d, name+".traineddata")); err == nil {
+				return name, d, true
+			}
+		}
+	}
+	return "eng", "", false
+}
+
 // grayBand extracts rect from src as a contrast-stretched grayscale image. Working
 // in Go removes the dependency on the PowerShell/System.Drawing preprocessing that
 // silently fails on some machines and starves Tesseract of a clean MRZ crop.
@@ -1274,6 +1388,48 @@ func otsuThreshold(g *image.Gray) uint8 {
 		}
 	}
 	return uint8(thr)
+}
+
+// sharpenGray applies an unsharp mask (original + (original - 3x3 box blur)) so
+// slightly out-of-focus MRZ strokes get crisper edges before binarization. Edges
+// are clamped. This raises the chance a mildly blurry crop reads cleanly enough to
+// pass the MRZ checksum; it cannot recover heavily smeared photos.
+func sharpenGray(src *image.Gray) *image.Gray {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dst := image.NewGray(image.Rect(0, 0, w, h))
+	at := func(x, y int) int {
+		if x < 0 {
+			x = 0
+		} else if x >= w {
+			x = w - 1
+		}
+		if y < 0 {
+			y = 0
+		} else if y >= h {
+			y = h - 1
+		}
+		return int(src.GrayAt(b.Min.X+x, b.Min.Y+y).Y)
+	}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			sum := 0
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					sum += at(x+dx, y+dy)
+				}
+			}
+			orig := at(x, y)
+			v := orig + (orig - sum/9) // amount = 1.0
+			if v < 0 {
+				v = 0
+			} else if v > 255 {
+				v = 255
+			}
+			dst.SetGray(x, y, color.Gray{Y: uint8(v)})
+		}
+	}
+	return dst
 }
 
 // binarize converts to pure black/white using the Otsu threshold. A clean binary
@@ -1343,8 +1499,9 @@ func cropMRZBandsGo(path, dir string) []string {
 		}
 		wf.Close()
 	}
-	// For each MRZ band emit both a contrast-stretched grayscale and an Otsu binary
-	// version. Whichever reads cleanest wins the checksum, so both are OCR'd.
+	// For each MRZ band emit a contrast-stretched grayscale, an Otsu binary, and a
+	// sharpened-then-binarized variant. Whichever reads cleanest wins the checksum,
+	// so all are OCR'd; the sharpened variant helps on mildly out-of-focus photos.
 	for i, bd := range bands {
 		y0 := b.Min.Y + int(float64(H)*bd[0])
 		y1 := b.Min.Y + int(float64(H)*bd[1])
@@ -1354,10 +1511,12 @@ func cropMRZBandsGo(path, dir string) []string {
 		g := grayBand(img, image.Rect(b.Min.X, y0, b.Max.X, y1))
 		writeImg(g, fmt.Sprintf("goband_%d.png", i))
 		writeImg(binarize(g), fmt.Sprintf("goband_%d_bw.png", i))
+		writeImg(binarize(sharpenGray(g)), fmt.Sprintf("goband_%d_sharp_bw.png", i))
 	}
 	full := grayBand(img, b)
 	writeImg(full, "goband_full.png")
 	writeImg(binarize(full), "goband_full_bw.png")
+	writeImg(binarize(sharpenGray(full)), "goband_full_sharp_bw.png")
 	return out
 }
 
@@ -1368,7 +1527,26 @@ func runTesseract(tess, path, tempDir, psm string, mrz bool) string {
 	// --oem 1 (LSTM) and an explicit --dpi avoid the slower legacy path and the
 	// per-run resolution guess. For MRZ crops we also drop the dictionaries and the
 	// inverted retry pass: the MRZ is a fixed OCR-B code.
-	args := []string{path, base, "-l", "eng", "--psm", psm, "--oem", "1", "--dpi", "300"}
+	lang, oem := "eng", "1"
+	args := []string{path, base}
+	if mrz {
+		// The machine-readable zone is OCR-B, a font the generic English model reads
+		// poorly. When a dedicated MRZ/OCR-B model is installed (mrz.traineddata or
+		// ocrb.traineddata in a tessdata folder), use it — this is what lets the MRZ
+		// read accurately fully offline, the way a real passport reader does. The
+		// model may be legacy-trained, so let Tesseract auto-pick the engine (--oem).
+		if l, dir, ok := mrzOCR(); ok {
+			lang = l
+			oem = ""
+			if dir != "" {
+				args = append(args, "--tessdata-dir", dir)
+			}
+		}
+	}
+	args = append(args, "-l", lang, "--psm", psm, "--dpi", "300")
+	if oem != "" {
+		args = append(args, "--oem", oem)
+	}
 	if mrz {
 		args = append(args,
 			"-c", "tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
@@ -1728,10 +1906,22 @@ func guestFromMRZLines(l1, l2 string) Guest {
 	if len(names) > 1 {
 		given = strings.ReplaceAll(strings.Join(names[1:], " "), "<", " ")
 	}
-	g := Guest{FullName: cleanName(surname + " " + given), BirthDate: mrzDate(l2[13:19], true), BirthPrecision: "D", Gender: normalizeGender(string(l2[20])), Nationality: strings.ReplaceAll(l2[10:13], "<", ""), Passport: strings.ReplaceAll(l2[0:9], "<", "")}
+	nat := strings.ReplaceAll(l2[10:13], "<", "")
+	g := Guest{FullName: cleanName(surname + " " + given), BirthDate: mrzDate(l2[13:19], true), BirthPrecision: "D", Gender: normalizeGender(string(l2[20])), Nationality: nat, Passport: strings.ReplaceAll(l2[0:9], "<", "")}
+	// The MRZ carries the nationality twice: the issuing country in line 1 (chars
+	// 3-5) and the nationality in line 2 (chars 11-13); they normally match. When
+	// both are clean 3-letter codes yet differ, one was likely misread into another
+	// valid code (e.g. USA↔AUS) — flag it for a human to cross-check the image, since
+	// the nationality field has no checksum of its own.
+	issuer := strings.ReplaceAll(l1[2:5], "<", "")
+	if alpha3(issuer) && alpha3(nat) && issuer != nat {
+		g.NatCross = strings.ToUpper(issuer)
+	}
 	normalizeGuest(&g)
 	return g
 }
+
+func alpha3(s string) bool { return regexp.MustCompile(`^[A-Za-z]{3}$`).MatchString(s) }
 
 func mrzChecksReasonable(l2 string) bool {
 	if len(l2) < 21 {
@@ -1865,12 +2055,13 @@ func parsePassportVisual(text string) Guest {
 	} else if regexp.MustCompile(`(?im)(?:SEX|SEXE|SEXO|GESLACHT)\D{0,20}\bM\b`).MatchString(u) || regexp.MustCompile(`\bM/M\b`).MatchString(u) {
 		g.Gender = "M"
 	}
-	// Label-based surname/given names. This runs when the MRZ first line gave no
-	// name OR gave a garbled one (chevrons OCR'd as letters), because the printed
-	// name is far more reliable. Real passports print the label trilingually
-	// (e.g. "Surname/Nom/Apellidos") with the value on the next line, so skip the
-	// rest of the label line then capture the first all-caps value line.
-	if g.FullName == "" || nameLooksGarbled(g.FullName) {
+	// Label-based surname/given names from the printed zone. This always runs (not
+	// only when the MRZ name is empty/garbled), because a truncated MRZ line 1 often
+	// yields just the surname — e.g. "NGUYEN" — while the printed "Given names" field
+	// still carries the full "TRINITY HOANG". Real passports print the label
+	// trilingually (e.g. "Surname/Nom/Apellidos") with the value on the next line, so
+	// skip the rest of the label line then capture the first all-caps value line.
+	{
 		sur := ""
 		giv := ""
 		if m := regexp.MustCompile(`(?is)(?:SURNAME|FAMILY NAME)\b[^\n]*\n\s*([A-Z][A-Z' \-]{1,40})`).FindStringSubmatch(u); len(m) > 1 {
@@ -1890,9 +2081,12 @@ func parsePassportVisual(text string) Guest {
 				giv = m[1]
 			}
 		}
+		// Keep whichever of the MRZ-line-1 name and the printed-label name is more
+		// complete (more name parts) and not garbled.
 		if labelName := cleanName(sur + " " + giv); labelName != "" && !nameLooksGarbled(labelName) {
-			g.FullName = labelName
-		} else if nameLooksGarbled(g.FullName) {
+			g.FullName = preferCompleteName(g.FullName, labelName)
+		}
+		if nameLooksGarbled(g.FullName) {
 			g.FullName = ""
 		}
 	}
@@ -1962,6 +2156,45 @@ func runPowerShell(script string, args []string, dir string) error {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(decodeText(b)))
 	}
 	return nil
+}
+
+// nationalityCodes returns the nationality code → country-name map used by the
+// export template ("MÃ QUỐC TỊCH"), parsed once from the embedded template.xlsx
+// shared strings (entries shaped "USA - United States of America"). This is the
+// same list the exported file uses, so the UI can validate/autocomplete against it.
+var (
+	countryOnce sync.Once
+	countryMap  map[string]string
+)
+
+func nationalityCodes() map[string]string {
+	countryOnce.Do(func() {
+		countryMap = map[string]string{}
+		b, err := embedded.ReadFile("template.xlsx")
+		if err != nil {
+			return
+		}
+		zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+		if err != nil {
+			return
+		}
+		re := regexp.MustCompile(`^([A-Z]{3}) - (.+)$`)
+		for _, f := range zr.File {
+			if f.Name != "xl/sharedStrings.xml" {
+				continue
+			}
+			data, e := readZipFile(f)
+			if e != nil {
+				continue
+			}
+			for _, s := range parseSharedStrings(data) {
+				if m := re.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
+					countryMap[m[1]] = strings.TrimSpace(m[2])
+				}
+			}
+		}
+	})
+	return countryMap
 }
 
 func makeTemplateExcel(rows []Guest) ([]byte, error) {

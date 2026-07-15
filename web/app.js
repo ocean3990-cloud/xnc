@@ -99,6 +99,37 @@ function normalizeNationality(value){
   const byName=countryNameToCode.get(normalizeKey(raw));
   return byName || exact.slice(0,20);
 }
+// Common OCR letter/digit confusions (bidirectional) for nationality codes.
+const OCR_AMBIG={A:['4'],'4':['A'],O:['0'],'0':['O'],I:['1'],'1':['I'],S:['5'],'5':['S'],B:['8'],'8':['B'],G:['6'],'6':['G'],Z:['2'],'2':['Z']};
+// correctNationalityCode: for a 3-char code that is NOT in the export template,
+// try the OCR swaps above. Returns {corrected:true, code} only when EXACTLY one
+// valid template code results (e.g. US4→USA, U5A→USA). If several valid codes are
+// reachable, or none, returns {corrected:false, candidates:[...]} so staff can pick.
+function correctNationalityCode(cand){
+  cand=String(cand||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  if(cand.length!==3) return {corrected:false, candidates:nearNationalityCodes(cand)};
+  const found=new Set();
+  const opts=[...cand].map(ch=>[ch,...(OCR_AMBIG[ch]||[])]);
+  for(const a of opts[0])for(const b of opts[1])for(const c of opts[2]){
+    const code=a+b+c;
+    if(/^[A-Z]{3}$/.test(code) && countryByCode.has(code)) found.add(code);
+  }
+  const arr=[...found];
+  if(arr.length===1) return {corrected:true, code:arr[0]};
+  return {corrected:false, candidates:arr.length?arr:nearNationalityCodes(cand)};
+}
+// nearNationalityCodes: valid template codes that differ from cand in at most one
+// position (used for the red "pick a code" list when correction is inconclusive).
+function nearNationalityCodes(cand){
+  cand=String(cand||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,3);
+  if(cand.length!==3) return [];
+  const out=[];
+  for(const code of countryByCode.keys()){
+    let d=0; for(let i=0;i<3;i++) if(code[i]!==cand[i]) d++;
+    if(d<=1){ out.push(code); if(out.length>=10) break; }
+  }
+  return out;
+}
 function normalizePassport(value){ return upper(value).replace(/[^A-Z0-9]/g,''); }
 function normalizeRoom(value){ return upper(value).replace(/\s+/g,''); }
 function normalizeName(value){ return settings.autoUppercase ? upper(value) : cleanText(value); }
@@ -117,7 +148,7 @@ function makeGuest(input={}, source={}){
     passport:normalizePassport(input.passport), room:normalizeRoom(input.room),
     arrival, departure, checkout,
     forceReview:!!input.forceReview, sourceName:source.name||'', sourceType:source.type||'', preview:source.preview||'',
-    confidence:source.confidence??null, status:'review', reasons:[]
+    confidence:source.confidence??null, status:'review', reasons:[], natNote:'', natInvalid:false, natCandidates:[], natCross:cleanText(input.natCross)
   };
 }
 
@@ -147,9 +178,17 @@ function validateAll(){
     if(!g.birthDate) reasons.push('Thiếu ngày sinh'); else if(!isValidDate(g.birthDate,g.birthPrecision)) reasons.push('Ngày sinh không hợp lệ');
     if(!['D','M','Y'].includes(g.birthPrecision)) reasons.push('Sai độ chính xác ngày sinh');
     if(!['M','F'].includes(g.gender)) reasons.push('Thiếu giới tính');
-    if(!g.nationality) reasons.push('Thiếu quốc tịch');
-    else if(!/^[A-Z]{3}$/.test(g.nationality)) reasons.push('Mã quốc tịch phải gồm 3 chữ cái');
-    else if(countryByCode.size && !countryByCode.has(g.nationality)) reasons.push('Mã quốc tịch không có trong mẫu');
+    if(!g.nationality){ reasons.push('Thiếu quốc tịch'); g.natInvalid=false; g.natCandidates=[]; g.natNote=''; }
+    else if(!countryByCode.size){ if(!/^[A-Z]{3}$/.test(g.nationality)) reasons.push('Mã quốc tịch phải gồm 3 chữ cái'); }
+    else if(countryByCode.has(g.nationality)){ g.natInvalid=false; g.natCandidates=[]; }
+    else {
+      const fix=correctNationalityCode(g.nationality);
+      if(fix.corrected){ g.natNote=`${g.nationality} đã được hiệu chỉnh thành ${fix.code}.`; g.nationality=fix.code; g.natInvalid=false; g.natCandidates=[]; }
+      else { reasons.push('Mã quốc tịch không hợp lệ'); g.natInvalid=true; g.natCandidates=fix.candidates||[]; g.natNote=''; }
+    }
+    // MRZ nationality mismatch (issuing country ≠ nationality): both may be valid,
+    // so this is a soft "cross-check the image" flag, not a hard block.
+    if(g.natCross && g.natCross!==g.nationality && !g.natInvalid) reasons.push('Quốc tịch cần đối chiếu ảnh/MRZ');
     if(!g.passport) reasons.push('Thiếu số hộ chiếu');
     if(!g.room) reasons.push('Thiếu số phòng');
     if(!g.arrival) reasons.push('Thiếu ngày đến'); else if(!isValidDate(g.arrival,'D')) reasons.push('Ngày đến không hợp lệ');
@@ -184,7 +223,7 @@ function renderTable(){
       <td contenteditable="true" data-field="birthDate">${escapeHtml(g.birthDate)}</td>
       <td><select class="grid-select" data-field="birthPrecision"><option value="" ${!g.birthPrecision?'selected':''}></option><option ${g.birthPrecision==='D'?'selected':''}>D</option><option ${g.birthPrecision==='M'?'selected':''}>M</option><option ${g.birthPrecision==='Y'?'selected':''}>Y</option></select></td>
       <td><select class="grid-select" data-field="gender"><option value=""></option><option value="M" ${g.gender==='M'?'selected':''}>Nam</option><option value="F" ${g.gender==='F'?'selected':''}>Nữ</option></select></td>
-      <td contenteditable="true" data-field="nationality">${escapeHtml(g.nationality)}</td>
+      <td contenteditable="true" data-field="nationality" class="${g.natInvalid?'nat-bad':''}">${escapeHtml(g.nationality)}</td>
       <td contenteditable="true" data-field="passport">${escapeHtml(g.passport)}</td>
       <td contenteditable="true" data-field="room">${escapeHtml(g.room)}</td>
       <td contenteditable="true" data-field="arrival">${escapeHtml(g.arrival)}</td>
@@ -227,9 +266,27 @@ function renderDetails(){
     else el.value=g?(g[field]??''):'';
     el.disabled=!g;
   }
-  const box=$('previewBox');
-  if(g?.preview) box.innerHTML=`<img src="${g.preview}" alt="Ảnh nguồn">`;
-  else box.innerHTML='<div class="preview-placeholder">Không có ảnh nguồn</div>';
+  const empty=$('viewerEmpty');
+  if(g&&g.preview){ if(empty)empty.hidden=true; if(inlineViewer)inlineViewer.load(g.preview); }
+  else { if(empty)empty.hidden=false; if(inlineViewer)inlineViewer.load(''); }
+  if(cropMode) cancelCrop();
+  const natEl=document.querySelector('#detailForm input[data-field="nationality"]');
+  if(natEl) natEl.classList.toggle('invalid', !!(g&&g.natInvalid));
+  const hint=$('natHint');
+  if(hint){
+    if(g&&g.natInvalid){
+      hint.hidden=false; hint.className='nat-hint bad';
+      const chips=(g.natCandidates||[]).map(c=>`<button type="button" class="nat-cand" data-code="${c}">${c} — ${escapeHtml(countryByCode.get(c)||'')}</button>`).join('');
+      hint.innerHTML=`Mã <b>${escapeHtml(g.nationality)}</b> không có trong danh sách. ${chips?'Chọn mã đúng: '+chips:'Nhập mã hợp lệ ở ô trên.'}`;
+    }
+    else if(g&&g.natCross&&g.natCross!==g.nationality){
+      hint.hidden=false; hint.className='nat-hint warn';
+      hint.innerHTML=`⚠ Cần đối chiếu ảnh/MRZ: nước cấp trên MRZ là <b>${escapeHtml(g.natCross)}</b> nhưng quốc tịch đọc được là <b>${escapeHtml(g.nationality)}</b>. Kiểm tra ảnh rồi bấm “Đánh dấu đã kiểm tra”. `+
+        `<button type="button" class="nat-cand" data-code="${escapeHtml(g.natCross)}">Dùng ${escapeHtml(g.natCross)}</button>`;
+    }
+    else if(g&&g.natNote){ hint.hidden=false; hint.className='nat-hint warn'; hint.textContent=g.natNote; }
+    else { hint.hidden=true; hint.innerHTML=''; }
+  }
   $('reasonBox').textContent=g?.reasons?.length?`Cần kiểm tra: ${g.reasons.join('; ')}`:'';
 }
 function renderCounters(){
@@ -245,7 +302,7 @@ function updateGuestField(g,field,value){
   else if(field==='birthDate'){ const d=parseDateValue(value,true); g.birthDate=d.value; if(d.precision) g.birthPrecision=d.precision; }
   else if(field==='birthPrecision') g[field]=String(value).charAt(0).toUpperCase();
   else if(field==='gender') g[field]=normalizeGender(value);
-  else if(field==='nationality') g[field]=normalizeNationality(value);
+  else if(field==='nationality'){ g.nationality=normalizeNationality(value); g.natNote=''; g.natCross=''; }
   else if(field==='passport') g[field]=normalizePassport(value);
   else if(field==='room') g[field]=normalizeRoom(value);
   else if(['arrival','departure','checkout'].includes(field)) g[field]=parseDateValue(value,false).value;
@@ -352,7 +409,16 @@ async function loadReferenceData(){
   try{
     const info=await (await fetch('/api/reference',{cache:'no-store'})).json();
     for(const [code,label] of Object.entries(info.countries||{})){countryByCode.set(code,label);countryNameToCode.set(normalizeKey(label),code);}
+    buildNationalityList();
   }catch(e){console.warn('Reference load failed',e);}
+}
+// Fill the nationality <datalist> so the field suggests "CODE - Name"; typing a
+// code or a country name both surface the match. normalizeNationality() resolves
+// whatever the user picks/types back to the 3-letter export code.
+function buildNationalityList(){
+  const dl=$('natList'); if(!dl) return;
+  dl.innerHTML=[...countryByCode.entries()].sort((a,b)=>a[0].localeCompare(b[0]))
+    .map(([code,name])=>`<option value="${escapeHtml(code+' - '+name)}"></option>`).join('');
 }
 
 function detectHeader(rows){
@@ -553,6 +619,12 @@ function isBlankOrArrivalOnly(g){
 function exportableRows(){ return guests.filter(g=>g.selected&&g.status!=='excluded'&&(!settings.skipBlankArrivalOnly||!isBlankOrArrivalOnly(g))); }
 async function confirmExport(rows){
   if(!rows.length){ showError('Chưa chọn dòng khách nước ngoài nào để xuất.'); return false; }
+  // Hard block: no export while any selected row has an invalid nationality code.
+  const badNat=rows.filter(g=>g.nationality && countryByCode.size && !countryByCode.has(g.nationality));
+  if(badNat.length){
+    showModal('Không thể xuất',`<div class="warning-box">Còn <b>${badNat.length}</b> dòng có <b>mã quốc tịch không hợp lệ</b> (không có trong danh sách mã của file mẫu). Hãy sửa (chọn mã gần đúng trong khung chi tiết) trước khi xuất.</div><ul>${badNat.map(g=>`<li>${escapeHtml(g.fullName||'(chưa có tên)')}: <b>${escapeHtml(g.nationality)}</b></li>`).join('')}</ul>`);
+    return false;
+  }
   const incomplete=rows.filter(g=>g.status!=='ok');
   if(incomplete.length){
     return await askConfirm('Xuất dữ liệu còn thiếu',`<div class="warning-box">Có <b>${incomplete.length}</b> / <b>${rows.length}</b> dòng còn thiếu hoặc cần kiểm tra. App vẫn xuất toàn bộ các dòng đã chọn và giữ trống dữ liệu chưa có để anh chỉnh sau.</div><p>Khách Việt Nam luôn được loại khỏi file.</p>`,'Vẫn xuất');
@@ -612,6 +684,150 @@ async function processFiles(files,mode='auto'){
   }
 }
 
+// Bản offline: không có AI. Toàn bộ dữ liệu xử lý trực tiếp trên máy.
+function openSettings(){
+  showModal('Cài đặt',`<div class="help-list">
+    <label><input type="checkbox" id="setUpper" ${settings.autoUppercase?'checked':''}> Tự chuyển họ tên thành chữ in hoa</label><br>
+    <label><input type="checkbox" id="setCopy" ${settings.copyDepartureToCheckout?'checked':''}> Khi thiếu, dùng Ngày đi dự kiến làm Ngày trả phòng</label><br>
+    <label><input type="checkbox" id="setVie" ${settings.ocrVietnamese?'checked':''}> OCR cả tiêu đề tiếng Việt (khuyến nghị)</label><br>
+    <label><input type="checkbox" id="setSkipBlank" ${settings.skipBlankArrivalOnly?'checked':''}> Tự bỏ qua dòng trống hoặc chỉ có Ngày đến khi xuất</label>
+    <hr>
+    <div class="about-box"><img src="./assets/logo.svg"><div><b>XNC - Khai báo tạm trú khách nước ngoài</b><br>Version 1.0.14<br>Developed by Ocean<br>© 2026 Ocean<br><small>Dữ liệu được xử lý trực tiếp trên máy, không tải lên máy chủ.</small></div></div>
+  </div>`);
+  setTimeout(()=>{
+    $('setUpper').onchange=e=>{settings.autoUppercase=e.target.checked;saveSettings()};
+    $('setCopy').onchange=e=>{settings.copyDepartureToCheckout=e.target.checked;saveSettings()};
+    $('setVie').onchange=e=>{settings.ocrVietnamese=e.target.checked;saveSettings();};
+    $('setSkipBlank').onchange=e=>{settings.skipBlankArrivalOnly=e.target.checked;saveSettings();};
+  },0);
+}
+// ===== Passport image viewer, splitter, quick-edit actions =====
+let inlineViewer=null, bigViewer=null, detailW=0;
+let cropMode=false, cropRectLocal=null, cropDrag=null;
+
+// makeViewer wires zoom (wheel), pan (drag), Fit/100%/200%, rotate and an MRZ-band
+// zoom onto one <img> inside a stage element. State is kept per instance so the
+// inline pane and the full-screen overlay are independent.
+function makeViewer(stage, img){
+  const st={scale:1,tx:0,ty:0,rot:0,nw:0,nh:0};
+  const rsize=()=>{ const r=((st.rot%360)+360)%360; return (r===90||r===270)?[st.nh,st.nw]:[st.nw,st.nh]; };
+  const apply=()=>{ img.style.transform=`translate(-50%,-50%) translate(${st.tx}px,${st.ty}px) rotate(${st.rot}deg) scale(${st.scale})`; };
+  function fit(){ const b=stage.getBoundingClientRect(); const [w,h]=rsize(); st.scale=(w&&h)?Math.min(b.width/w,b.height/h)*0.97:1; st.tx=0; st.ty=0; apply(); }
+  function zoom(z){ st.scale=z; st.tx=0; st.ty=0; apply(); }
+  function mrz(){ const b=stage.getBoundingClientRect(); const [w,h]=rsize(); if(!w||!h)return; const band=0.26; st.scale=Math.min(b.width/w,b.height/(h*band))*0.97; st.tx=0; st.ty=-h*(0.5-band/2)*st.scale; apply(); }
+  function rotate(d){ st.rot=(st.rot+d+360)%360; fit(); }
+  function load(src){
+    if(!src){ img.hidden=true; img.removeAttribute('src'); return; }
+    img.hidden=false;
+    const done=()=>{ st.nw=img.naturalWidth; st.nh=img.naturalHeight; st.rot=0; fit(); };
+    if(img.getAttribute('src')!==src){ img.onload=done; img.setAttribute('src',src); }
+    else if(img.complete && img.naturalWidth){ done(); }
+  }
+  stage.addEventListener('wheel',e=>{ if(img.hidden)return; e.preventDefault(); const f=e.deltaY<0?1.15:1/1.15; st.scale=Math.max(.05,Math.min(25,st.scale*f)); apply(); },{passive:false});
+  let drag=null;
+  stage.addEventListener('mousedown',e=>{ if(img.hidden||stage.classList.contains('cropping'))return; drag={x:e.clientX,y:e.clientY,tx:st.tx,ty:st.ty}; stage.classList.add('grabbing'); });
+  window.addEventListener('mousemove',e=>{ if(!drag)return; st.tx=drag.tx+(e.clientX-drag.x); st.ty=drag.ty+(e.clientY-drag.y); apply(); });
+  window.addEventListener('mouseup',()=>{ if(drag){drag=null;stage.classList.remove('grabbing');} });
+  return {st,fit,zoom,mrz,rotate,load};
+}
+function viewerCmd(v,cmd){ if(cmd==='fit')v.fit(); else if(cmd==='z100')v.zoom(1); else if(cmd==='z200')v.zoom(2); else if(cmd==='mrz')v.mrz(); else if(cmd==='rotl')v.rotate(-90); else if(cmd==='rotr')v.rotate(90); }
+
+function openBig(){ const g=findGuest(activeId); if(!g||!g.preview){ toast('Không có ảnh để xem','bad'); return; } $('bigView').classList.remove('hidden'); bigViewer.load(g.preview); requestAnimationFrame(()=>bigViewer.fit()); }
+function closeBig(){ $('bigView').classList.add('hidden'); if(document.fullscreenElement) document.exitFullscreen().catch(()=>{}); }
+function toggleFullscreen(el){ if(document.fullscreenElement){ document.exitFullscreen().catch(()=>{}); } else { (el||document.documentElement).requestFullscreen().catch(()=>{}); } }
+
+// Splitter: detail pane defaults to ~38% of the workspace width and is draggable.
+function setDetailWidth(px){ const ws=$('dropZone'); const total=ws.clientWidth; const min=300,max=Math.max(min,Math.min(total-560,total*0.62)); px=Math.max(min,Math.min(max,px)); ws.style.gridTemplateColumns=`minmax(0,1fr) 6px ${Math.round(px)}px`; detailW=px; }
+function initSplitter(){
+  const ws=$('dropZone'), sp=$('splitter'); if(!sp)return;
+  setDetailWidth(ws.clientWidth*0.38);
+  let d=null;
+  sp.addEventListener('mousedown',e=>{ d={x:e.clientX,w:detailW}; document.body.classList.add('col-resizing'); e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!d)return; setDetailWidth(d.w-(e.clientX-d.x)); });
+  window.addEventListener('mouseup',()=>{ if(d){d=null; document.body.classList.remove('col-resizing'); inlineViewer&&inlineViewer.fit();} });
+  window.addEventListener('resize',()=>{ if(detailW){setDetailWidth(detailW); inlineViewer&&inlineViewer.fit();} });
+}
+
+// Manual MRZ crop: draw a rectangle over the image, then OCR just that region and
+// update the CURRENT guest (never adds a new row).
+function startCropMode(){ const g=findGuest(activeId); if(!g||!g.preview){ toast('Không có ảnh để cắt','bad'); return; } cropMode=true; $('viewerStage').classList.add('cropping'); $('cropBar').hidden=false; cropRectLocal=null; $('cropBox').hidden=true; toast('Kéo chọn đúng 2 dòng MRZ rồi bấm “Đọc vùng đã chọn”','');
+}
+function cancelCrop(){ cropMode=false; const s=$('viewerStage'); if(s)s.classList.remove('cropping'); const bar=$('cropBar'); if(bar)bar.hidden=true; const box=$('cropBox'); if(box)box.hidden=true; cropRectLocal=null; cropDrag=null; }
+async function cropRegionToBlob(){
+  const v=inlineViewer.st, rect=cropRectLocal; if(!rect||rect.w<8||rect.h<8) return null;
+  const sb=$('viewerStage').getBoundingClientRect(), cx=sb.width/2, cy=sb.height/2;
+  const r=(-v.rot)*Math.PI/180, cos=Math.cos(r), sin=Math.sin(r);
+  const toNat=(px,py)=>{ let dx=(px-cx-v.tx)/v.scale, dy=(py-cy-v.ty)/v.scale; return [v.nw/2+(dx*cos-dy*sin), v.nh/2+(dx*sin+dy*cos)]; };
+  const pts=[toNat(rect.x,rect.y),toNat(rect.x+rect.w,rect.y),toNat(rect.x+rect.w,rect.y+rect.h),toNat(rect.x,rect.y+rect.h)];
+  const xs=pts.map(p=>p[0]), ys=pts.map(p=>p[1]);
+  const x0=Math.max(0,Math.floor(Math.min(...xs))), y0=Math.max(0,Math.floor(Math.min(...ys)));
+  const x1=Math.min(v.nw,Math.ceil(Math.max(...xs))), y1=Math.min(v.nh,Math.ceil(Math.max(...ys)));
+  const cw=x1-x0, ch=y1-y0; if(cw<8||ch<8) return null;
+  const canvas=document.createElement('canvas'); canvas.width=cw; canvas.height=ch;
+  canvas.getContext('2d').drawImage($('viewerImg'), x0,y0,cw,ch, 0,0,cw,ch);
+  return await new Promise(res=>canvas.toBlob(b=>res(b),'image/png'));
+}
+
+function dataURLtoBlob(u){ const [head,b64]=u.split(','); const mime=(head.match(/data:([^;]+)/)||[])[1]||'image/png'; const bin=atob(b64); const arr=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i); return new Blob([arr],{type:mime}); }
+// OCR a passport image (whole image or a crop) and merge the passport fields into
+// the guest currently selected — this never creates a new guest.
+async function applyPassportRead(blob,label){
+  const g=findGuest(activeId); if(!g){ toast('Chưa chọn khách','bad'); return; }
+  setBusy(true,label||'Đang đọc lại MRZ',g.sourceName||'',10);
+  try{
+    const ext=blob.type.includes('png')?'png':'jpg';
+    const data=await uploadImport(new File([blob],`reread.${ext}`,{type:blob.type||'image/png'}),'passport');
+    const rec=(data.records||[])[0];
+    if(!rec){ toast(data.warning||'Không đọc được MRZ từ ảnh này','bad'); return; }
+    const norm=makeGuest(rec,{});
+    const changed=[];
+    for(const f of ['fullName','birthDate','birthPrecision','gender','nationality','passport']){ if(cleanText(norm[f])){ g[f]=norm[f]; changed.push(f); } }
+    if(changed.includes('nationality')) g.natCross=norm.natCross||'';
+    validateAll(); renderAll();
+    toast(changed.length?`Đã cập nhật: ${changed.map(f=>FIELD_LABELS[f]||f).join(', ')}`:'Không có trường nào thay đổi', changed.length?'ok':'');
+  }catch(e){ console.error(e); showError('Không đọc được MRZ: '+e.message); }
+  finally{ setBusy(false); }
+}
+async function rereadMrz(){ const g=findGuest(activeId); if(!g||!g.preview){ toast('Khách này không có ảnh nguồn','bad'); return; } await applyPassportRead(dataURLtoBlob(g.preview),'Đang đọc lại MRZ'); }
+async function readCroppedRegion(){ const blob=await cropRegionToBlob(); if(!blob){ toast('Vùng chọn quá nhỏ','bad'); return; } cancelCrop(); await applyPassportRead(blob,'Đang đọc vùng đã cắt'); }
+
+function saveNext(){ const list=filteredGuests(); if(!list.length)return; const i=list.findIndex(g=>g.id===activeId); const next=list[i+1]||list[i]||list[0]; activeId=next.id; renderAll(); const f=document.querySelector('#detailForm input[data-field="fullName"]'); if(f)f.focus(); }
+function deleteActiveRow(){ const g=findGuest(activeId); if(!g)return; const list=filteredGuests(); const i=list.findIndex(x=>x.id===activeId); guests=guests.filter(x=>x.id!==activeId); const nl=filteredGuests(); activeId=(nl[i]||nl[i-1]||nl[nl.length-1]||{}).id||null; renderAll(); }
+function markReviewedActive(){ const g=findGuest(activeId); if(!g)return; g.forceReview=false; g.natCross=''; validateAll(); renderAll(); toast('Đã đánh dấu đã kiểm tra','ok'); }
+
+function initDetailPane(){
+  inlineViewer=makeViewer($('viewerStage'),$('viewerImg'));
+  bigViewer=makeViewer($('bigStage'),$('bigImg'));
+  // Viewer toolbars
+  document.querySelectorAll('#viewer .viewer-toolbar button[data-vz]').forEach(b=>b.onclick=()=>{
+    const c=b.dataset.vz;
+    if(c==='big') openBig(); else if(c==='crop') startCropMode(); else viewerCmd(inlineViewer,c);
+  });
+  document.querySelectorAll('#bigView .bigview-toolbar button[data-bz]').forEach(b=>b.onclick=()=>{
+    const c=b.dataset.bz;
+    if(c==='close') closeBig(); else if(c==='full') toggleFullscreen($('bigView')); else viewerCmd(bigViewer,c);
+  });
+  $('viewerImg').addEventListener('dblclick',openBig);
+  $('fullscreenBtn').onclick=()=>toggleFullscreen($('detailPane'));
+  // Crop drag over the stage
+  const stage=$('viewerStage');
+  stage.addEventListener('mousedown',e=>{ if(!cropMode)return; const sb=stage.getBoundingClientRect(); cropDrag={x:e.clientX-sb.left,y:e.clientY-sb.top}; e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!cropDrag)return; const sb=stage.getBoundingClientRect(); const x=Math.max(0,Math.min(sb.width,e.clientX-sb.left)), y=Math.max(0,Math.min(sb.height,e.clientY-sb.top)); cropRectLocal={x:Math.min(x,cropDrag.x),y:Math.min(y,cropDrag.y),w:Math.abs(x-cropDrag.x),h:Math.abs(y-cropDrag.y)}; const box=$('cropBox'); box.hidden=false; box.style.left=cropRectLocal.x+'px'; box.style.top=cropRectLocal.y+'px'; box.style.width=cropRectLocal.w+'px'; box.style.height=cropRectLocal.h+'px'; });
+  window.addEventListener('mouseup',()=>{ cropDrag=null; });
+  $('cropRead').onclick=readCroppedRegion;
+  $('cropCancel').onclick=cancelCrop;
+  // Pick a suggested nationality code (red "invalid" state)
+  $('natHint').addEventListener('click',e=>{ const b=e.target.closest('.nat-cand'); if(!b)return; const g=findGuest(activeId); if(!g)return; g.nationality=b.dataset.code; g.natNote=''; g.natCross=''; validateAll(); renderAll(); });
+  // Action buttons
+  $('saveNextBtn').onclick=saveNext;
+  $('rereadBtn').onclick=rereadMrz;
+  $('markReviewedBtn').onclick=markReviewedActive;
+  $('deleteRowBtn').onclick=deleteActiveRow;
+  // Enter moves to the next field; Ctrl+Enter saves & goes to next guest.
+  const fields=[...document.querySelectorAll('#detailForm input:not([type=checkbox]),#detailForm select')];
+  fields.forEach((el,i)=>el.addEventListener('keydown',e=>{ if(e.key!=='Enter')return; e.preventDefault(); if(e.ctrlKey){saveNext();return;} const n=fields[i+1]; if(n)n.focus(); else saveNext(); }));
+}
+
 function bindEvents(){
   const modeByInput={generalInput:'auto',passportInput:'passport',tableImageInput:'table-image',pdfInput:'pdf',excelInput:'excel',wordInput:'word'};
   document.querySelectorAll('[data-input]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.input).click()));
@@ -635,16 +851,21 @@ function bindEvents(){
   $('searchInput').oninput=e=>{currentSearch=e.target.value;renderTable();};
   detailInputs.forEach(el=>el.addEventListener(el.type==='checkbox'||el.tagName==='SELECT'?'change':'input',()=>{const g=findGuest(activeId);if(!g)return;updateGuestField(g,el.dataset.field,el.type==='checkbox'?el.checked:el.value);validateAll();renderTable();renderCounters();$('reasonBox').textContent=g.reasons.length?`Cần kiểm tra: ${g.reasons.join('; ')}`:'';}));
   $('exportXmlBtn').onclick=exportXml;$('exportExcelBtn').onclick=exportExcel;
-  $('helpBtn').onclick=()=>showModal('Hướng dẫn sử dụng',`<div class="help-list"><b>1. Thêm dữ liệu</b><br>• Excel: tự nhận diện dòng tiêu đề và ánh xạ cột.<br>• Word: đọc trực tiếp bảng/văn bản; nếu file có ảnh scan, app trích ảnh và OCR.<br>• PDF/ảnh bảng: nhận diện từng dòng khách bằng OCR.<br>• Ảnh hộ chiếu: dò trên ảnh nhỏ, dựng thẳng ảnh gốc, OCR 3 vùng và kiểm tra checksum MRZ; mỗi ảnh tạo đúng một khách.<br>• Dán ảnh hộ chiếu: bấm nút “📋 Dán ảnh hộ chiếu” hoặc nhấn Ctrl+V ở bất kỳ đâu; ảnh chỉ giữ tạm trong bộ nhớ, mỗi lần dán tạo một khách.<br><br><b>2. Kiểm tra</b><br>Ô thiếu hoặc sai được đánh dấu “Cần kiểm tra”. Mã VNM tự bị loại. Có thể sửa trực tiếp trên bảng hoặc khung bên phải.<br><br><b>3. Xuất</b><br>Chọn các dòng cần dùng, sau đó Xuất XML hoặc Xuất Excel. Các dòng còn thiếu vẫn có thể xuất để chỉnh sau; app sẽ cảnh báo trước khi tạo file.<br><br><b>Mẹo</b><br>Ảnh bảng nên chụp thẳng, đủ sáng; ảnh hộ chiếu cần thấy rõ hai dòng MRZ phía dưới.</div>`);
-  $('settingsBtn').onclick=()=>{showModal('Cài đặt',`<div class="help-list"><label><input type="checkbox" id="setUpper" ${settings.autoUppercase?'checked':''}> Tự chuyển họ tên thành chữ in hoa</label><br><label><input type="checkbox" id="setCopy" ${settings.copyDepartureToCheckout?'checked':''}> Khi thiếu, dùng Ngày đi dự kiến làm Ngày trả phòng</label><br><label><input type="checkbox" id="setVie" ${settings.ocrVietnamese?'checked':''}> OCR cả tiêu đề tiếng Việt (khuyến nghị)</label><br><label><input type="checkbox" id="setSkipBlank" ${settings.skipBlankArrivalOnly?'checked':''}> Tự bỏ qua dòng trống hoặc chỉ có Ngày đến khi xuất</label><hr><div class="about-box"><img src="./assets/logo.svg"><div><b>XNC - Khai báo tạm trú khách nước ngoài</b><br>Version 1.0.14<br>Developed by Ocean<br>© 2026 Ocean<br><small>Dữ liệu được xử lý trực tiếp trên máy, không tải lên máy chủ.</small></div></div>`);setTimeout(()=>{$('setUpper').onchange=e=>{settings.autoUppercase=e.target.checked;saveSettings()};$('setCopy').onchange=e=>{settings.copyDepartureToCheckout=e.target.checked;saveSettings()};$('setVie').onchange=e=>{settings.ocrVietnamese=e.target.checked;saveSettings();};$('setSkipBlank').onchange=e=>{settings.skipBlankArrivalOnly=e.target.checked;saveSettings();};},0);};
+  $('helpBtn').onclick=()=>showModal('Hướng dẫn sử dụng',`<div class="help-list"><b>1. Thêm dữ liệu</b><br>• Excel: tự nhận diện dòng tiêu đề và ánh xạ cột.<br>• Word: đọc trực tiếp bảng/văn bản; nếu file có ảnh scan, app trích ảnh và OCR.<br>• PDF/ảnh bảng: nhận diện từng dòng khách bằng OCR.<br>• Ảnh hộ chiếu: dò trên ảnh nhỏ, dựng thẳng ảnh gốc, OCR 3 vùng và kiểm tra checksum MRZ; mỗi ảnh tạo đúng một khách.<br>• Đọc chính xác hơn (offline): cài Tesseract-OCR và đặt file <code>mrz.traineddata</code> (hoặc <code>ocrb.traineddata</code>) vào thư mục <code>tessdata</code> — MRZ sẽ đọc bằng model chuyên font OCR-B như máy đọc hộ chiếu.<br>• Dán ảnh hộ chiếu: bấm nút “📋 Dán ảnh hộ chiếu” hoặc nhấn Ctrl+V ở bất kỳ đâu; ảnh chỉ giữ tạm trong bộ nhớ, mỗi lần dán tạo một khách.<br><br><b>2. Kiểm tra</b><br>Ô thiếu hoặc sai được đánh dấu “Cần kiểm tra”. Mã VNM tự bị loại. Có thể sửa trực tiếp trên bảng hoặc khung bên phải.<br><br><b>3. Xuất</b><br>Chọn các dòng cần dùng, sau đó Xuất XML hoặc Xuất Excel. Các dòng còn thiếu vẫn có thể xuất để chỉnh sau; app sẽ cảnh báo trước khi tạo file.<br><br><b>Mẹo</b><br>Ảnh bảng nên chụp thẳng, đủ sáng; ảnh hộ chiếu cần thấy rõ hai dòng MRZ phía dưới.</div>`);
+  $('settingsBtn').onclick=openSettings;
   $('modalClose').onclick=closeModal;$('modal').addEventListener('click',e=>{if(e.target===$('modal'))closeModal()});
-  document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='f'){e.preventDefault();$('searchInput').focus()}if(e.ctrlKey&&e.key.toLowerCase()==='o'){e.preventDefault();$('generalInput').click()}if(e.key==='Escape')closeModal();});
+  document.addEventListener('keydown',e=>{
+    if(e.ctrlKey&&e.key.toLowerCase()==='f'){e.preventDefault();$('searchInput').focus();}
+    if(e.ctrlKey&&e.key.toLowerCase()==='o'){e.preventDefault();$('generalInput').click();}
+    if(e.key==='F11'){ e.preventDefault(); toggleFullscreen($('bigView').classList.contains('hidden')?$('detailPane'):$('bigView')); }
+    if(e.key==='Escape'){ if(!$('bigView').classList.contains('hidden')){ closeBig(); } else if(cropMode){ cancelCrop(); } else { closeModal(); } }
+  });
   window.addEventListener('beforeunload',()=>{try{navigator.sendBeacon('/api/shutdown','1')}catch{}});
 }
 
 (async function init(){
   setBusy(true,'Đang khởi tạo','Nạp mẫu và dữ liệu tham chiếu',15);
-  await loadReferenceData(); bindEvents(); renderAll(); setBusy(false);
+  await loadReferenceData(); initDetailPane(); bindEvents(); initSplitter(); renderAll(); setBusy(false);
 })();
 
 
