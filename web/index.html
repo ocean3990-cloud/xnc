@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XNC - Khai báo tạm trú cho khách nước ngoài</title>
+  <link rel="icon" href="./assets/logo.svg">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand"><img src="./assets/logo.svg" alt="XNC"><strong>XNC - Khai báo tạm trú cho khách nước ngoài</strong></div>
+    <div class="title-actions"><button class="header-help" id="helpBtn" title="Mở hướng dẫn"><span>❔</span> Hướng dẫn</button><span class="version">Phiên bản: 1.0.14</span></div>
+  </header>
+
+  <section class="toolbar">
+    <button class="tool" data-input="generalInput" title="Mở Excel, Word, PDF hoặc ảnh"><span>📂</span>Mở file <small>⌄</small></button>
+    <div class="separator"></div>
+    <button class="tool" data-input="passportInput"><span>🛂</span>Thêm ảnh hộ chiếu</button>
+    <button class="tool" id="pastePassportBtn" title="Dán ảnh hộ chiếu từ clipboard (Ctrl+V)"><span>📋</span>Dán ảnh hộ chiếu</button>
+    <button class="tool" data-input="tableImageInput"><span>🖼️</span>Thêm ảnh bảng (JPG, PNG)</button>
+    <button class="tool" data-input="pdfInput"><span>📕</span>Thêm PDF</button>
+    <button class="tool" data-input="excelInput"><span>📗</span>Thêm Excel</button>
+    <button class="tool" data-input="wordInput"><span>📘</span>Thêm Word</button>
+    <div class="separator"></div>
+    <button class="tool" id="addRowBtn"><span>➕</span>Thêm dòng</button>
+    <button class="tool" id="deleteBtn"><span>🗑️</span>Xóa dòng</button>
+    <button class="tool quick-tool" id="quickFillBtn"><span>⚡</span>Điền nhanh</button>
+    <div class="toolbar-spacer"></div>
+    <button class="tool" id="settingsBtn"><span>⚙️</span>Cài đặt</button>
+    <button class="export primary" id="exportXmlBtn"><span>📄</span>Xuất XML</button>
+    <button class="export secondary" id="exportExcelBtn"><span>📊</span>Xuất Excel</button>
+  </section>
+
+  <section class="summary-strip">
+    <span>Tổng số dòng: <b id="totalCount">0</b></span>
+    <span class="ok">Đã đủ dữ liệu: <b id="validCount">0</b></span>
+    <span class="warn">Cần kiểm tra: <b id="reviewCount">0</b></span>
+    <span class="bad">Bị loại (Việt Nam): <b id="vnCount">0</b></span>
+    <div class="summary-spacer"></div>
+    <label class="search"><span>⌕</span><input id="searchInput" placeholder="Tìm kiếm (Ctrl+F)"></label>
+  </section>
+
+  <main class="workspace" id="dropZone">
+    <section class="left-pane">
+      <div class="drop-hint" id="dropHint">Kéo thả file vào đây hoặc dùng các nút phía trên để thêm dữ liệu</div>
+      <div class="table-wrap">
+        <table id="guestTable">
+          <thead>
+            <tr>
+              <th class="check-col"><input type="checkbox" id="selectAll"></th>
+              <th class="stt-col">STT</th>
+              <th class="name-col">Họ tên</th>
+              <th>Ngày sinh</th>
+              <th>Đúng đến</th>
+              <th>Giới tính</th>
+              <th>Quốc tịch</th>
+              <th>Số hộ chiếu</th>
+              <th>Số phòng</th>
+              <th>Ngày đến</th>
+              <th>Ngày đi dự kiến</th>
+              <th>Ngày trả phòng</th>
+              <th class="status-col">Trạng thái</th>
+            </tr>
+          </thead>
+          <tbody id="guestBody"></tbody>
+        </table>
+        <div class="empty-state" id="emptyState">
+          <div class="empty-icon">📋</div>
+          <strong>Chưa có dữ liệu</strong>
+          <p>Thêm Excel, Word, PDF, ảnh bảng hoặc ảnh hộ chiếu để bắt đầu.</p>
+        </div>
+      </div>
+      <div class="selection-line"><input type="checkbox" id="selectVisible"> <span id="selectedText">Đã chọn: 0 / 0 dòng</span></div>
+
+      <section class="bottom-panels">
+        <div class="panel metrics">
+          <h3>Tổng hợp</h3>
+          <div class="metric-row">
+            <div><span class="metric-icon">👥</span><small>Tổng số dòng</small><strong id="metricTotal">0</strong></div>
+            <div><span class="metric-icon ok">●</span><small>Đủ dữ liệu</small><strong id="metricValid">0</strong></div>
+            <div><span class="metric-icon warn">▲</span><small>Cần kiểm tra</small><strong id="metricReview">0</strong></div>
+            <div><span class="metric-icon bad">⊘</span><small>Bị loại (Việt Nam)</small><strong id="metricVn">0</strong></div>
+          </div>
+        </div>
+        <div class="panel notes">
+          <h3>Ghi chú</h3>
+          <p>• Bị loại: Quốc tịch VNM hoặc Việt Nam</p>
+          <p>• Cần kiểm tra: Thiếu hoặc chưa chắc chắn thông tin bắt buộc</p>
+          <p>• Quốc tịch ưu tiên lấy trực tiếp từ MRZ; có thể nhập tay nếu thiếu</p>
+          <p>• Ngày đến trống được tự điền bằng ngày hôm nay</p>
+          <p>• Dòng còn thiếu vẫn được xuất để tiếp tục chỉnh sửa; khách Việt Nam không xuất</p>
+        </div>
+      </section>
+    </section>
+
+    <aside class="detail-pane">
+      <div class="detail-title">Thông tin chi tiết <span>⌃</span></div>
+      <div class="preview-box" id="previewBox">
+        <div class="preview-placeholder">Không có ảnh nguồn</div>
+      </div>
+      <div class="detail-form" id="detailForm">
+        <label>Họ tên<input data-field="fullName"></label>
+        <label>Ngày sinh<input data-field="birthDate" placeholder="DD/MM/YYYY, MM/YYYY hoặc YYYY"></label>
+        <label>Ngày sinh đúng đến<select data-field="birthPrecision"><option value="">-- Chọn --</option><option value="D">D - Ngày</option><option value="M">M - Tháng</option><option value="Y">Y - Năm</option></select></label>
+        <label>Giới tính<select data-field="gender"><option value="">-- Chọn --</option><option value="M">Nam (M)</option><option value="F">Nữ (F)</option></select></label>
+        <label>Quốc tịch (MRZ)<input data-field="nationality" maxlength="3" class="nationality-input"></label>
+        <label>Số hộ chiếu<input data-field="passport"></label>
+        <label>Số phòng<input data-field="room"></label>
+        <label>Ngày đến<input data-field="arrival" placeholder="DD/MM/YYYY"></label>
+        <label>Ngày đi dự kiến<input data-field="departure" placeholder="DD/MM/YYYY"></label>
+        <label>Ngày trả phòng<input data-field="checkout" placeholder="DD/MM/YYYY"></label>
+        <label class="review-check"><input type="checkbox" data-field="forceReview"> Đánh dấu cần kiểm tra</label>
+        <div class="reason" id="reasonBox"></div>
+      </div>
+    </aside>
+  </main>
+
+  <footer>
+    <div><span class="ready-dot"></span><span id="statusText">Sẵn sàng</span></div>
+    <div>© 2026 Ocean</div>
+  </footer>
+
+  <input hidden id="generalInput" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.docx,.doc,.jpg,.jpeg,.png">
+  <input hidden id="passportInput" type="file" multiple accept=".jpg,.jpeg,.png">
+  <input hidden id="tableImageInput" type="file" multiple accept=".jpg,.jpeg,.png">
+  <input hidden id="pdfInput" type="file" multiple accept=".pdf">
+  <input hidden id="excelInput" type="file" multiple accept=".xlsx,.xls,.csv">
+  <input hidden id="wordInput" type="file" multiple accept=".docx,.doc">
+
+  <div class="overlay hidden" id="busyOverlay">
+    <div class="busy-card"><div class="spinner"></div><strong id="busyTitle">Đang xử lý…</strong><p id="busyDetail"></p><div class="progress"><i id="progressBar"></i></div></div>
+  </div>
+
+  <div class="modal hidden" id="modal">
+    <div class="modal-card">
+      <button class="modal-close" id="modalClose">×</button>
+      <h2 id="modalTitle"></h2>
+      <div id="modalContent"></div>
+      <div class="modal-actions" id="modalActions"><button id="modalOk">Đóng</button></div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
