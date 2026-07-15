@@ -108,7 +108,7 @@ func (s *appServer) routes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]string{"version": version}) })
 	mux.HandleFunc("/api/reference", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"countries": map[string]string{}})
+		writeJSON(w, map[string]any{"countries": nationalityCodes()})
 	})
 	mux.HandleFunc("/api/import", s.handleImport)
 	mux.HandleFunc("/api/export/excel", s.handleExportExcel)
@@ -2119,6 +2119,45 @@ func runPowerShell(script string, args []string, dir string) error {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(decodeText(b)))
 	}
 	return nil
+}
+
+// nationalityCodes returns the nationality code → country-name map used by the
+// export template ("MÃ QUỐC TỊCH"), parsed once from the embedded template.xlsx
+// shared strings (entries shaped "USA - United States of America"). This is the
+// same list the exported file uses, so the UI can validate/autocomplete against it.
+var (
+	countryOnce sync.Once
+	countryMap  map[string]string
+)
+
+func nationalityCodes() map[string]string {
+	countryOnce.Do(func() {
+		countryMap = map[string]string{}
+		b, err := embedded.ReadFile("template.xlsx")
+		if err != nil {
+			return
+		}
+		zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+		if err != nil {
+			return
+		}
+		re := regexp.MustCompile(`^([A-Z]{3}) - (.+)$`)
+		for _, f := range zr.File {
+			if f.Name != "xl/sharedStrings.xml" {
+				continue
+			}
+			data, e := readZipFile(f)
+			if e != nil {
+				continue
+			}
+			for _, s := range parseSharedStrings(data) {
+				if m := re.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
+					countryMap[m[1]] = strings.TrimSpace(m[2])
+				}
+			}
+		}
+	})
+	return countryMap
 }
 
 func makeTemplateExcel(rows []Guest) ([]byte, error) {

@@ -227,9 +227,10 @@ function renderDetails(){
     else el.value=g?(g[field]??''):'';
     el.disabled=!g;
   }
-  const box=$('previewBox');
-  if(g?.preview) box.innerHTML=`<img src="${g.preview}" alt="Ảnh nguồn">`;
-  else box.innerHTML='<div class="preview-placeholder">Không có ảnh nguồn</div>';
+  const empty=$('viewerEmpty');
+  if(g&&g.preview){ if(empty)empty.hidden=true; if(inlineViewer)inlineViewer.load(g.preview); }
+  else { if(empty)empty.hidden=false; if(inlineViewer)inlineViewer.load(''); }
+  if(cropMode) cancelCrop();
   $('reasonBox').textContent=g?.reasons?.length?`Cần kiểm tra: ${g.reasons.join('; ')}`:'';
 }
 function renderCounters(){
@@ -352,7 +353,16 @@ async function loadReferenceData(){
   try{
     const info=await (await fetch('/api/reference',{cache:'no-store'})).json();
     for(const [code,label] of Object.entries(info.countries||{})){countryByCode.set(code,label);countryNameToCode.set(normalizeKey(label),code);}
+    buildNationalityList();
   }catch(e){console.warn('Reference load failed',e);}
+}
+// Fill the nationality <datalist> so the field suggests "CODE - Name"; typing a
+// code or a country name both surface the match. normalizeNationality() resolves
+// whatever the user picks/types back to the 3-letter export code.
+function buildNationalityList(){
+  const dl=$('natList'); if(!dl) return;
+  dl.innerHTML=[...countryByCode.entries()].sort((a,b)=>a[0].localeCompare(b[0]))
+    .map(([code,name])=>`<option value="${escapeHtml(code+' - '+name)}"></option>`).join('');
 }
 
 function detectHeader(rows){
@@ -629,6 +639,130 @@ function openSettings(){
     $('setSkipBlank').onchange=e=>{settings.skipBlankArrivalOnly=e.target.checked;saveSettings();};
   },0);
 }
+// ===== Passport image viewer, splitter, quick-edit actions =====
+let inlineViewer=null, bigViewer=null, detailW=0;
+let cropMode=false, cropRectLocal=null, cropDrag=null;
+
+// makeViewer wires zoom (wheel), pan (drag), Fit/100%/200%, rotate and an MRZ-band
+// zoom onto one <img> inside a stage element. State is kept per instance so the
+// inline pane and the full-screen overlay are independent.
+function makeViewer(stage, img){
+  const st={scale:1,tx:0,ty:0,rot:0,nw:0,nh:0};
+  const rsize=()=>{ const r=((st.rot%360)+360)%360; return (r===90||r===270)?[st.nh,st.nw]:[st.nw,st.nh]; };
+  const apply=()=>{ img.style.transform=`translate(-50%,-50%) translate(${st.tx}px,${st.ty}px) rotate(${st.rot}deg) scale(${st.scale})`; };
+  function fit(){ const b=stage.getBoundingClientRect(); const [w,h]=rsize(); st.scale=(w&&h)?Math.min(b.width/w,b.height/h)*0.97:1; st.tx=0; st.ty=0; apply(); }
+  function zoom(z){ st.scale=z; st.tx=0; st.ty=0; apply(); }
+  function mrz(){ const b=stage.getBoundingClientRect(); const [w,h]=rsize(); if(!w||!h)return; const band=0.26; st.scale=Math.min(b.width/w,b.height/(h*band))*0.97; st.tx=0; st.ty=-h*(0.5-band/2)*st.scale; apply(); }
+  function rotate(d){ st.rot=(st.rot+d+360)%360; fit(); }
+  function load(src){
+    if(!src){ img.hidden=true; img.removeAttribute('src'); return; }
+    img.hidden=false;
+    const done=()=>{ st.nw=img.naturalWidth; st.nh=img.naturalHeight; st.rot=0; fit(); };
+    if(img.getAttribute('src')!==src){ img.onload=done; img.setAttribute('src',src); }
+    else if(img.complete && img.naturalWidth){ done(); }
+  }
+  stage.addEventListener('wheel',e=>{ if(img.hidden)return; e.preventDefault(); const f=e.deltaY<0?1.15:1/1.15; st.scale=Math.max(.05,Math.min(25,st.scale*f)); apply(); },{passive:false});
+  let drag=null;
+  stage.addEventListener('mousedown',e=>{ if(img.hidden||stage.classList.contains('cropping'))return; drag={x:e.clientX,y:e.clientY,tx:st.tx,ty:st.ty}; stage.classList.add('grabbing'); });
+  window.addEventListener('mousemove',e=>{ if(!drag)return; st.tx=drag.tx+(e.clientX-drag.x); st.ty=drag.ty+(e.clientY-drag.y); apply(); });
+  window.addEventListener('mouseup',()=>{ if(drag){drag=null;stage.classList.remove('grabbing');} });
+  return {st,fit,zoom,mrz,rotate,load};
+}
+function viewerCmd(v,cmd){ if(cmd==='fit')v.fit(); else if(cmd==='z100')v.zoom(1); else if(cmd==='z200')v.zoom(2); else if(cmd==='mrz')v.mrz(); else if(cmd==='rotl')v.rotate(-90); else if(cmd==='rotr')v.rotate(90); }
+
+function openBig(){ const g=findGuest(activeId); if(!g||!g.preview){ toast('Không có ảnh để xem','bad'); return; } $('bigView').classList.remove('hidden'); bigViewer.load(g.preview); requestAnimationFrame(()=>bigViewer.fit()); }
+function closeBig(){ $('bigView').classList.add('hidden'); if(document.fullscreenElement) document.exitFullscreen().catch(()=>{}); }
+function toggleFullscreen(el){ if(document.fullscreenElement){ document.exitFullscreen().catch(()=>{}); } else { (el||document.documentElement).requestFullscreen().catch(()=>{}); } }
+
+// Splitter: detail pane defaults to ~38% of the workspace width and is draggable.
+function setDetailWidth(px){ const ws=$('dropZone'); const total=ws.clientWidth; const min=300,max=Math.max(min,Math.min(total-560,total*0.62)); px=Math.max(min,Math.min(max,px)); ws.style.gridTemplateColumns=`minmax(0,1fr) 6px ${Math.round(px)}px`; detailW=px; }
+function initSplitter(){
+  const ws=$('dropZone'), sp=$('splitter'); if(!sp)return;
+  setDetailWidth(ws.clientWidth*0.38);
+  let d=null;
+  sp.addEventListener('mousedown',e=>{ d={x:e.clientX,w:detailW}; document.body.classList.add('col-resizing'); e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!d)return; setDetailWidth(d.w-(e.clientX-d.x)); });
+  window.addEventListener('mouseup',()=>{ if(d){d=null; document.body.classList.remove('col-resizing'); inlineViewer&&inlineViewer.fit();} });
+  window.addEventListener('resize',()=>{ if(detailW){setDetailWidth(detailW); inlineViewer&&inlineViewer.fit();} });
+}
+
+// Manual MRZ crop: draw a rectangle over the image, then OCR just that region and
+// update the CURRENT guest (never adds a new row).
+function startCropMode(){ const g=findGuest(activeId); if(!g||!g.preview){ toast('Không có ảnh để cắt','bad'); return; } cropMode=true; $('viewerStage').classList.add('cropping'); $('cropBar').hidden=false; cropRectLocal=null; $('cropBox').hidden=true; toast('Kéo chọn đúng 2 dòng MRZ rồi bấm “Đọc vùng đã chọn”','');
+}
+function cancelCrop(){ cropMode=false; const s=$('viewerStage'); if(s)s.classList.remove('cropping'); const bar=$('cropBar'); if(bar)bar.hidden=true; const box=$('cropBox'); if(box)box.hidden=true; cropRectLocal=null; cropDrag=null; }
+async function cropRegionToBlob(){
+  const v=inlineViewer.st, rect=cropRectLocal; if(!rect||rect.w<8||rect.h<8) return null;
+  const sb=$('viewerStage').getBoundingClientRect(), cx=sb.width/2, cy=sb.height/2;
+  const r=(-v.rot)*Math.PI/180, cos=Math.cos(r), sin=Math.sin(r);
+  const toNat=(px,py)=>{ let dx=(px-cx-v.tx)/v.scale, dy=(py-cy-v.ty)/v.scale; return [v.nw/2+(dx*cos-dy*sin), v.nh/2+(dx*sin+dy*cos)]; };
+  const pts=[toNat(rect.x,rect.y),toNat(rect.x+rect.w,rect.y),toNat(rect.x+rect.w,rect.y+rect.h),toNat(rect.x,rect.y+rect.h)];
+  const xs=pts.map(p=>p[0]), ys=pts.map(p=>p[1]);
+  const x0=Math.max(0,Math.floor(Math.min(...xs))), y0=Math.max(0,Math.floor(Math.min(...ys)));
+  const x1=Math.min(v.nw,Math.ceil(Math.max(...xs))), y1=Math.min(v.nh,Math.ceil(Math.max(...ys)));
+  const cw=x1-x0, ch=y1-y0; if(cw<8||ch<8) return null;
+  const canvas=document.createElement('canvas'); canvas.width=cw; canvas.height=ch;
+  canvas.getContext('2d').drawImage($('viewerImg'), x0,y0,cw,ch, 0,0,cw,ch);
+  return await new Promise(res=>canvas.toBlob(b=>res(b),'image/png'));
+}
+
+function dataURLtoBlob(u){ const [head,b64]=u.split(','); const mime=(head.match(/data:([^;]+)/)||[])[1]||'image/png'; const bin=atob(b64); const arr=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i); return new Blob([arr],{type:mime}); }
+// OCR a passport image (whole image or a crop) and merge the passport fields into
+// the guest currently selected — this never creates a new guest.
+async function applyPassportRead(blob,label){
+  const g=findGuest(activeId); if(!g){ toast('Chưa chọn khách','bad'); return; }
+  setBusy(true,label||'Đang đọc lại MRZ',g.sourceName||'',10);
+  try{
+    const ext=blob.type.includes('png')?'png':'jpg';
+    const data=await uploadImport(new File([blob],`reread.${ext}`,{type:blob.type||'image/png'}),'passport');
+    const rec=(data.records||[])[0];
+    if(!rec){ toast(data.warning||'Không đọc được MRZ từ ảnh này','bad'); return; }
+    const norm=makeGuest(rec,{});
+    const changed=[];
+    for(const f of ['fullName','birthDate','birthPrecision','gender','nationality','passport']){ if(cleanText(norm[f])){ g[f]=norm[f]; changed.push(f); } }
+    validateAll(); renderAll();
+    toast(changed.length?`Đã cập nhật: ${changed.map(f=>FIELD_LABELS[f]||f).join(', ')}`:'Không có trường nào thay đổi', changed.length?'ok':'');
+  }catch(e){ console.error(e); showError('Không đọc được MRZ: '+e.message); }
+  finally{ setBusy(false); }
+}
+async function rereadMrz(){ const g=findGuest(activeId); if(!g||!g.preview){ toast('Khách này không có ảnh nguồn','bad'); return; } await applyPassportRead(dataURLtoBlob(g.preview),'Đang đọc lại MRZ'); }
+async function readCroppedRegion(){ const blob=await cropRegionToBlob(); if(!blob){ toast('Vùng chọn quá nhỏ','bad'); return; } cancelCrop(); await applyPassportRead(blob,'Đang đọc vùng đã cắt'); }
+
+function saveNext(){ const list=filteredGuests(); if(!list.length)return; const i=list.findIndex(g=>g.id===activeId); const next=list[i+1]||list[i]||list[0]; activeId=next.id; renderAll(); const f=document.querySelector('#detailForm input[data-field="fullName"]'); if(f)f.focus(); }
+function deleteActiveRow(){ const g=findGuest(activeId); if(!g)return; const list=filteredGuests(); const i=list.findIndex(x=>x.id===activeId); guests=guests.filter(x=>x.id!==activeId); const nl=filteredGuests(); activeId=(nl[i]||nl[i-1]||nl[nl.length-1]||{}).id||null; renderAll(); }
+function markReviewedActive(){ const g=findGuest(activeId); if(!g)return; g.forceReview=false; validateAll(); renderAll(); toast('Đã đánh dấu đã kiểm tra','ok'); }
+
+function initDetailPane(){
+  inlineViewer=makeViewer($('viewerStage'),$('viewerImg'));
+  bigViewer=makeViewer($('bigStage'),$('bigImg'));
+  // Viewer toolbars
+  document.querySelectorAll('#viewer .viewer-toolbar button[data-vz]').forEach(b=>b.onclick=()=>{
+    const c=b.dataset.vz;
+    if(c==='big') openBig(); else if(c==='crop') startCropMode(); else viewerCmd(inlineViewer,c);
+  });
+  document.querySelectorAll('#bigView .bigview-toolbar button[data-bz]').forEach(b=>b.onclick=()=>{
+    const c=b.dataset.bz;
+    if(c==='close') closeBig(); else if(c==='full') toggleFullscreen($('bigView')); else viewerCmd(bigViewer,c);
+  });
+  $('viewerImg').addEventListener('dblclick',openBig);
+  $('fullscreenBtn').onclick=()=>toggleFullscreen($('detailPane'));
+  // Crop drag over the stage
+  const stage=$('viewerStage');
+  stage.addEventListener('mousedown',e=>{ if(!cropMode)return; const sb=stage.getBoundingClientRect(); cropDrag={x:e.clientX-sb.left,y:e.clientY-sb.top}; e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!cropDrag)return; const sb=stage.getBoundingClientRect(); const x=Math.max(0,Math.min(sb.width,e.clientX-sb.left)), y=Math.max(0,Math.min(sb.height,e.clientY-sb.top)); cropRectLocal={x:Math.min(x,cropDrag.x),y:Math.min(y,cropDrag.y),w:Math.abs(x-cropDrag.x),h:Math.abs(y-cropDrag.y)}; const box=$('cropBox'); box.hidden=false; box.style.left=cropRectLocal.x+'px'; box.style.top=cropRectLocal.y+'px'; box.style.width=cropRectLocal.w+'px'; box.style.height=cropRectLocal.h+'px'; });
+  window.addEventListener('mouseup',()=>{ cropDrag=null; });
+  $('cropRead').onclick=readCroppedRegion;
+  $('cropCancel').onclick=cancelCrop;
+  // Action buttons
+  $('saveNextBtn').onclick=saveNext;
+  $('rereadBtn').onclick=rereadMrz;
+  $('markReviewedBtn').onclick=markReviewedActive;
+  $('deleteRowBtn').onclick=deleteActiveRow;
+  // Enter moves to the next field; Ctrl+Enter saves & goes to next guest.
+  const fields=[...document.querySelectorAll('#detailForm input:not([type=checkbox]),#detailForm select')];
+  fields.forEach((el,i)=>el.addEventListener('keydown',e=>{ if(e.key!=='Enter')return; e.preventDefault(); if(e.ctrlKey){saveNext();return;} const n=fields[i+1]; if(n)n.focus(); else saveNext(); }));
+}
+
 function bindEvents(){
   const modeByInput={generalInput:'auto',passportInput:'passport',tableImageInput:'table-image',pdfInput:'pdf',excelInput:'excel',wordInput:'word'};
   document.querySelectorAll('[data-input]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.input).click()));
@@ -655,13 +789,18 @@ function bindEvents(){
   $('helpBtn').onclick=()=>showModal('Hướng dẫn sử dụng',`<div class="help-list"><b>1. Thêm dữ liệu</b><br>• Excel: tự nhận diện dòng tiêu đề và ánh xạ cột.<br>• Word: đọc trực tiếp bảng/văn bản; nếu file có ảnh scan, app trích ảnh và OCR.<br>• PDF/ảnh bảng: nhận diện từng dòng khách bằng OCR.<br>• Ảnh hộ chiếu: dò trên ảnh nhỏ, dựng thẳng ảnh gốc, OCR 3 vùng và kiểm tra checksum MRZ; mỗi ảnh tạo đúng một khách.<br>• Đọc chính xác hơn (offline): cài Tesseract-OCR và đặt file <code>mrz.traineddata</code> (hoặc <code>ocrb.traineddata</code>) vào thư mục <code>tessdata</code> — MRZ sẽ đọc bằng model chuyên font OCR-B như máy đọc hộ chiếu.<br>• Dán ảnh hộ chiếu: bấm nút “📋 Dán ảnh hộ chiếu” hoặc nhấn Ctrl+V ở bất kỳ đâu; ảnh chỉ giữ tạm trong bộ nhớ, mỗi lần dán tạo một khách.<br><br><b>2. Kiểm tra</b><br>Ô thiếu hoặc sai được đánh dấu “Cần kiểm tra”. Mã VNM tự bị loại. Có thể sửa trực tiếp trên bảng hoặc khung bên phải.<br><br><b>3. Xuất</b><br>Chọn các dòng cần dùng, sau đó Xuất XML hoặc Xuất Excel. Các dòng còn thiếu vẫn có thể xuất để chỉnh sau; app sẽ cảnh báo trước khi tạo file.<br><br><b>Mẹo</b><br>Ảnh bảng nên chụp thẳng, đủ sáng; ảnh hộ chiếu cần thấy rõ hai dòng MRZ phía dưới.</div>`);
   $('settingsBtn').onclick=openSettings;
   $('modalClose').onclick=closeModal;$('modal').addEventListener('click',e=>{if(e.target===$('modal'))closeModal()});
-  document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='f'){e.preventDefault();$('searchInput').focus()}if(e.ctrlKey&&e.key.toLowerCase()==='o'){e.preventDefault();$('generalInput').click()}if(e.key==='Escape')closeModal();});
+  document.addEventListener('keydown',e=>{
+    if(e.ctrlKey&&e.key.toLowerCase()==='f'){e.preventDefault();$('searchInput').focus();}
+    if(e.ctrlKey&&e.key.toLowerCase()==='o'){e.preventDefault();$('generalInput').click();}
+    if(e.key==='F11'){ e.preventDefault(); toggleFullscreen($('bigView').classList.contains('hidden')?$('detailPane'):$('bigView')); }
+    if(e.key==='Escape'){ if(!$('bigView').classList.contains('hidden')){ closeBig(); } else if(cropMode){ cancelCrop(); } else { closeModal(); } }
+  });
   window.addEventListener('beforeunload',()=>{try{navigator.sendBeacon('/api/shutdown','1')}catch{}});
 }
 
 (async function init(){
   setBusy(true,'Đang khởi tạo','Nạp mẫu và dữ liệu tham chiếu',15);
-  await loadReferenceData(); bindEvents(); renderAll(); setBusy(false);
+  await loadReferenceData(); initDetailPane(); bindEvents(); initSplitter(); renderAll(); setBusy(false);
 })();
 
 
