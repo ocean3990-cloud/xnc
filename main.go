@@ -858,20 +858,20 @@ func readPassport(path, tempDir string) ([]Guest, string, error) {
 		// birth, nationality) yet lack the name (line-1 chevrons OCR'd as letters, or
 		// a sparse/truncated line-1) or the sex (a truncated line-2 window). Fill any
 		// missing field from the printed visual zone, which OCRs far more reliably.
-		if g.FullName == "" || nameLooksGarbled(g.FullName) || g.Gender == "" {
-			v := parsePassportVisual(txt)
-			if g.FullName == "" || nameLooksGarbled(g.FullName) {
-				if v.FullName != "" && !nameLooksGarbled(v.FullName) {
-					g.FullName = v.FullName
-				} else if nameLooksGarbled(g.FullName) {
-					g.FullName = "" // drop garbage rather than show it
-				}
-			}
-			if g.Gender == "" && v.Gender != "" {
-				g.Gender = v.Gender
-			}
-			normalizeGuest(&g)
+		// Cross-check name and sex against the printed visual zone. The MRZ name can be
+		// incomplete (a truncated line-1 leaves only the last given name, e.g. "HOANG"
+		// instead of "TRAN DIEP THI HOANG") or garbled (chevrons OCR'd as letters). The
+		// printed zone often carries the full name, so keep whichever candidate is more
+		// complete (more name parts) and not garbled.
+		v := parsePassportVisual(txt)
+		g.FullName = preferCompleteName(g.FullName, v.FullName)
+		if nameLooksGarbled(g.FullName) {
+			g.FullName = "" // drop garbage rather than show it
 		}
+		if g.Gender == "" && v.Gender != "" {
+			g.Gender = v.Gender
+		}
+		normalizeGuest(&g)
 		if g.FullName == "" {
 			warn = "Đã đọc được MRZ nhưng chưa lấy được họ tên; vui lòng nhập họ tên." + noTess
 		}
@@ -1024,6 +1024,28 @@ func nameLooksGarbled(name string) bool {
 		}
 	}
 	return false
+}
+
+// preferCompleteName picks the more complete of two candidate names. A non-garbled
+// candidate with more word tokens wins; if only one is usable it is returned; ties
+// keep the primary (MRZ) name. This recovers full names when the MRZ line-1 read is
+// truncated to a single token but the printed visual zone has the whole name.
+func preferCompleteName(primary, alt string) string {
+	p := strings.TrimSpace(primary)
+	a := strings.TrimSpace(alt)
+	pGood := p != "" && !nameLooksGarbled(p)
+	aGood := a != "" && !nameLooksGarbled(a)
+	switch {
+	case pGood && aGood:
+		if len(strings.Fields(a)) > len(strings.Fields(p)) {
+			return a
+		}
+		return p
+	case aGood:
+		return a
+	default:
+		return p // primary (may be garbled/empty; caller drops garbage)
+	}
 }
 
 func cleanName(s string) string {
@@ -1343,6 +1365,48 @@ func otsuThreshold(g *image.Gray) uint8 {
 	return uint8(thr)
 }
 
+// sharpenGray applies an unsharp mask (original + (original - 3x3 box blur)) so
+// slightly out-of-focus MRZ strokes get crisper edges before binarization. Edges
+// are clamped. This raises the chance a mildly blurry crop reads cleanly enough to
+// pass the MRZ checksum; it cannot recover heavily smeared photos.
+func sharpenGray(src *image.Gray) *image.Gray {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dst := image.NewGray(image.Rect(0, 0, w, h))
+	at := func(x, y int) int {
+		if x < 0 {
+			x = 0
+		} else if x >= w {
+			x = w - 1
+		}
+		if y < 0 {
+			y = 0
+		} else if y >= h {
+			y = h - 1
+		}
+		return int(src.GrayAt(b.Min.X+x, b.Min.Y+y).Y)
+	}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			sum := 0
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					sum += at(x+dx, y+dy)
+				}
+			}
+			orig := at(x, y)
+			v := orig + (orig - sum/9) // amount = 1.0
+			if v < 0 {
+				v = 0
+			} else if v > 255 {
+				v = 255
+			}
+			dst.SetGray(x, y, color.Gray{Y: uint8(v)})
+		}
+	}
+	return dst
+}
+
 // binarize converts to pure black/white using the Otsu threshold. A clean binary
 // image is what OCR-B recognition benefits from most on real, uneven photos.
 func binarize(g *image.Gray) *image.Gray {
@@ -1410,8 +1474,9 @@ func cropMRZBandsGo(path, dir string) []string {
 		}
 		wf.Close()
 	}
-	// For each MRZ band emit both a contrast-stretched grayscale and an Otsu binary
-	// version. Whichever reads cleanest wins the checksum, so both are OCR'd.
+	// For each MRZ band emit a contrast-stretched grayscale, an Otsu binary, and a
+	// sharpened-then-binarized variant. Whichever reads cleanest wins the checksum,
+	// so all are OCR'd; the sharpened variant helps on mildly out-of-focus photos.
 	for i, bd := range bands {
 		y0 := b.Min.Y + int(float64(H)*bd[0])
 		y1 := b.Min.Y + int(float64(H)*bd[1])
@@ -1421,10 +1486,12 @@ func cropMRZBandsGo(path, dir string) []string {
 		g := grayBand(img, image.Rect(b.Min.X, y0, b.Max.X, y1))
 		writeImg(g, fmt.Sprintf("goband_%d.png", i))
 		writeImg(binarize(g), fmt.Sprintf("goband_%d_bw.png", i))
+		writeImg(binarize(sharpenGray(g)), fmt.Sprintf("goband_%d_sharp_bw.png", i))
 	}
 	full := grayBand(img, b)
 	writeImg(full, "goband_full.png")
 	writeImg(binarize(full), "goband_full_bw.png")
+	writeImg(binarize(sharpenGray(full)), "goband_full_sharp_bw.png")
 	return out
 }
 
