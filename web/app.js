@@ -148,7 +148,7 @@ function makeGuest(input={}, source={}){
     passport:normalizePassport(input.passport), room:normalizeRoom(input.room),
     arrival, departure, checkout,
     forceReview:!!input.forceReview, sourceName:source.name||'', sourceType:source.type||'', preview:source.preview||'',
-    confidence:source.confidence??null, status:'review', reasons:[], natNote:'', natInvalid:false, natCandidates:[]
+    confidence:source.confidence??null, status:'review', reasons:[], natNote:'', natInvalid:false, natCandidates:[], natCross:cleanText(input.natCross)
   };
 }
 
@@ -186,6 +186,9 @@ function validateAll(){
       if(fix.corrected){ g.natNote=`${g.nationality} đã được hiệu chỉnh thành ${fix.code}.`; g.nationality=fix.code; g.natInvalid=false; g.natCandidates=[]; }
       else { reasons.push('Mã quốc tịch không hợp lệ'); g.natInvalid=true; g.natCandidates=fix.candidates||[]; g.natNote=''; }
     }
+    // MRZ nationality mismatch (issuing country ≠ nationality): both may be valid,
+    // so this is a soft "cross-check the image" flag, not a hard block.
+    if(g.natCross && g.natCross!==g.nationality && !g.natInvalid) reasons.push('Quốc tịch cần đối chiếu ảnh/MRZ');
     if(!g.passport) reasons.push('Thiếu số hộ chiếu');
     if(!g.room) reasons.push('Thiếu số phòng');
     if(!g.arrival) reasons.push('Thiếu ngày đến'); else if(!isValidDate(g.arrival,'D')) reasons.push('Ngày đến không hợp lệ');
@@ -271,12 +274,18 @@ function renderDetails(){
   if(natEl) natEl.classList.toggle('invalid', !!(g&&g.natInvalid));
   const hint=$('natHint');
   if(hint){
-    if(g&&g.natNote){ hint.hidden=false; hint.className='nat-hint warn'; hint.textContent=g.natNote; }
-    else if(g&&g.natInvalid){
+    if(g&&g.natInvalid){
       hint.hidden=false; hint.className='nat-hint bad';
       const chips=(g.natCandidates||[]).map(c=>`<button type="button" class="nat-cand" data-code="${c}">${c} — ${escapeHtml(countryByCode.get(c)||'')}</button>`).join('');
       hint.innerHTML=`Mã <b>${escapeHtml(g.nationality)}</b> không có trong danh sách. ${chips?'Chọn mã đúng: '+chips:'Nhập mã hợp lệ ở ô trên.'}`;
-    } else { hint.hidden=true; hint.innerHTML=''; }
+    }
+    else if(g&&g.natCross&&g.natCross!==g.nationality){
+      hint.hidden=false; hint.className='nat-hint warn';
+      hint.innerHTML=`⚠ Cần đối chiếu ảnh/MRZ: nước cấp trên MRZ là <b>${escapeHtml(g.natCross)}</b> nhưng quốc tịch đọc được là <b>${escapeHtml(g.nationality)}</b>. Kiểm tra ảnh rồi bấm “Đánh dấu đã kiểm tra”. `+
+        `<button type="button" class="nat-cand" data-code="${escapeHtml(g.natCross)}">Dùng ${escapeHtml(g.natCross)}</button>`;
+    }
+    else if(g&&g.natNote){ hint.hidden=false; hint.className='nat-hint warn'; hint.textContent=g.natNote; }
+    else { hint.hidden=true; hint.innerHTML=''; }
   }
   $('reasonBox').textContent=g?.reasons?.length?`Cần kiểm tra: ${g.reasons.join('; ')}`:'';
 }
@@ -293,7 +302,7 @@ function updateGuestField(g,field,value){
   else if(field==='birthDate'){ const d=parseDateValue(value,true); g.birthDate=d.value; if(d.precision) g.birthPrecision=d.precision; }
   else if(field==='birthPrecision') g[field]=String(value).charAt(0).toUpperCase();
   else if(field==='gender') g[field]=normalizeGender(value);
-  else if(field==='nationality'){ g.nationality=normalizeNationality(value); g.natNote=''; }
+  else if(field==='nationality'){ g.nationality=normalizeNationality(value); g.natNote=''; g.natCross=''; }
   else if(field==='passport') g[field]=normalizePassport(value);
   else if(field==='room') g[field]=normalizeRoom(value);
   else if(['arrival','departure','checkout'].includes(field)) g[field]=parseDateValue(value,false).value;
@@ -773,6 +782,7 @@ async function applyPassportRead(blob,label){
     const norm=makeGuest(rec,{});
     const changed=[];
     for(const f of ['fullName','birthDate','birthPrecision','gender','nationality','passport']){ if(cleanText(norm[f])){ g[f]=norm[f]; changed.push(f); } }
+    if(changed.includes('nationality')) g.natCross=norm.natCross||'';
     validateAll(); renderAll();
     toast(changed.length?`Đã cập nhật: ${changed.map(f=>FIELD_LABELS[f]||f).join(', ')}`:'Không có trường nào thay đổi', changed.length?'ok':'');
   }catch(e){ console.error(e); showError('Không đọc được MRZ: '+e.message); }
@@ -783,7 +793,7 @@ async function readCroppedRegion(){ const blob=await cropRegionToBlob(); if(!blo
 
 function saveNext(){ const list=filteredGuests(); if(!list.length)return; const i=list.findIndex(g=>g.id===activeId); const next=list[i+1]||list[i]||list[0]; activeId=next.id; renderAll(); const f=document.querySelector('#detailForm input[data-field="fullName"]'); if(f)f.focus(); }
 function deleteActiveRow(){ const g=findGuest(activeId); if(!g)return; const list=filteredGuests(); const i=list.findIndex(x=>x.id===activeId); guests=guests.filter(x=>x.id!==activeId); const nl=filteredGuests(); activeId=(nl[i]||nl[i-1]||nl[nl.length-1]||{}).id||null; renderAll(); }
-function markReviewedActive(){ const g=findGuest(activeId); if(!g)return; g.forceReview=false; validateAll(); renderAll(); toast('Đã đánh dấu đã kiểm tra','ok'); }
+function markReviewedActive(){ const g=findGuest(activeId); if(!g)return; g.forceReview=false; g.natCross=''; validateAll(); renderAll(); toast('Đã đánh dấu đã kiểm tra','ok'); }
 
 function initDetailPane(){
   inlineViewer=makeViewer($('viewerStage'),$('viewerImg'));
@@ -807,7 +817,7 @@ function initDetailPane(){
   $('cropRead').onclick=readCroppedRegion;
   $('cropCancel').onclick=cancelCrop;
   // Pick a suggested nationality code (red "invalid" state)
-  $('natHint').addEventListener('click',e=>{ const b=e.target.closest('.nat-cand'); if(!b)return; const g=findGuest(activeId); if(!g)return; g.nationality=b.dataset.code; g.natNote=''; validateAll(); renderAll(); });
+  $('natHint').addEventListener('click',e=>{ const b=e.target.closest('.nat-cand'); if(!b)return; const g=findGuest(activeId); if(!g)return; g.nationality=b.dataset.code; g.natNote=''; g.natCross=''; validateAll(); renderAll(); });
   // Action buttons
   $('saveNextBtn').onclick=saveNext;
   $('rereadBtn').onclick=rereadMrz;

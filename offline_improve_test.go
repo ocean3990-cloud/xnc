@@ -38,6 +38,20 @@ func TestVisualNameRecoversGivenFromLabels(t *testing.T) {
 	}
 }
 
+func TestMRZNationalityCrossCheck(t *testing.T) {
+	l1 := "P<USATRAN<<DIEP<THI<HOANG<<<<<<<<<<<<<<<<<<<" // issuer USA
+	// nationality field (chars 11-13) says AUS — a plausible USA↔AUS misread.
+	mismatch := guestFromMRZLines(l1, "A691252571AUS7909087F3506053356549008<676742")
+	if mismatch.Nationality != "AUS" || mismatch.NatCross != "USA" {
+		t.Fatalf("expected nationality AUS with cross USA, got %q / %q", mismatch.Nationality, mismatch.NatCross)
+	}
+	// When issuer and nationality agree, no cross-check flag is raised.
+	ok := guestFromMRZLines(l1, "A691252571USA7909087F3506053356549008<676742")
+	if ok.NatCross != "" {
+		t.Fatalf("expected no cross flag, got %q", ok.NatCross)
+	}
+}
+
 func TestSharpenGray(t *testing.T) {
 	// Uniform image: 3x3 box blur equals the pixel, so unsharp is a no-op.
 	uni := image.NewGray(image.Rect(0, 0, 5, 5))

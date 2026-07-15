@@ -44,6 +44,7 @@ type Guest struct {
 	BirthPrecision string `json:"birthPrecision"`
 	Gender         string `json:"gender"`
 	Nationality    string `json:"nationality"`
+	NatCross       string `json:"natCross,omitempty"`
 	Passport       string `json:"passport"`
 	Room           string `json:"room"`
 	Arrival        string `json:"arrival"`
@@ -1881,10 +1882,22 @@ func guestFromMRZLines(l1, l2 string) Guest {
 	if len(names) > 1 {
 		given = strings.ReplaceAll(strings.Join(names[1:], " "), "<", " ")
 	}
-	g := Guest{FullName: cleanName(surname + " " + given), BirthDate: mrzDate(l2[13:19], true), BirthPrecision: "D", Gender: normalizeGender(string(l2[20])), Nationality: strings.ReplaceAll(l2[10:13], "<", ""), Passport: strings.ReplaceAll(l2[0:9], "<", "")}
+	nat := strings.ReplaceAll(l2[10:13], "<", "")
+	g := Guest{FullName: cleanName(surname + " " + given), BirthDate: mrzDate(l2[13:19], true), BirthPrecision: "D", Gender: normalizeGender(string(l2[20])), Nationality: nat, Passport: strings.ReplaceAll(l2[0:9], "<", "")}
+	// The MRZ carries the nationality twice: the issuing country in line 1 (chars
+	// 3-5) and the nationality in line 2 (chars 11-13); they normally match. When
+	// both are clean 3-letter codes yet differ, one was likely misread into another
+	// valid code (e.g. USA↔AUS) — flag it for a human to cross-check the image, since
+	// the nationality field has no checksum of its own.
+	issuer := strings.ReplaceAll(l1[2:5], "<", "")
+	if alpha3(issuer) && alpha3(nat) && issuer != nat {
+		g.NatCross = strings.ToUpper(issuer)
+	}
 	normalizeGuest(&g)
 	return g
 }
+
+func alpha3(s string) bool { return regexp.MustCompile(`^[A-Za-z]{3}$`).MatchString(s) }
 
 func mrzChecksReasonable(l2 string) bool {
 	if len(l2) < 21 {
