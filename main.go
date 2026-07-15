@@ -2018,12 +2018,13 @@ func parsePassportVisual(text string) Guest {
 	} else if regexp.MustCompile(`(?im)(?:SEX|SEXE|SEXO|GESLACHT)\D{0,20}\bM\b`).MatchString(u) || regexp.MustCompile(`\bM/M\b`).MatchString(u) {
 		g.Gender = "M"
 	}
-	// Label-based surname/given names. This runs when the MRZ first line gave no
-	// name OR gave a garbled one (chevrons OCR'd as letters), because the printed
-	// name is far more reliable. Real passports print the label trilingually
-	// (e.g. "Surname/Nom/Apellidos") with the value on the next line, so skip the
-	// rest of the label line then capture the first all-caps value line.
-	if g.FullName == "" || nameLooksGarbled(g.FullName) {
+	// Label-based surname/given names from the printed zone. This always runs (not
+	// only when the MRZ name is empty/garbled), because a truncated MRZ line 1 often
+	// yields just the surname — e.g. "NGUYEN" — while the printed "Given names" field
+	// still carries the full "TRINITY HOANG". Real passports print the label
+	// trilingually (e.g. "Surname/Nom/Apellidos") with the value on the next line, so
+	// skip the rest of the label line then capture the first all-caps value line.
+	{
 		sur := ""
 		giv := ""
 		if m := regexp.MustCompile(`(?is)(?:SURNAME|FAMILY NAME)\b[^\n]*\n\s*([A-Z][A-Z' \-]{1,40})`).FindStringSubmatch(u); len(m) > 1 {
@@ -2043,9 +2044,12 @@ func parsePassportVisual(text string) Guest {
 				giv = m[1]
 			}
 		}
+		// Keep whichever of the MRZ-line-1 name and the printed-label name is more
+		// complete (more name parts) and not garbled.
 		if labelName := cleanName(sur + " " + giv); labelName != "" && !nameLooksGarbled(labelName) {
-			g.FullName = labelName
-		} else if nameLooksGarbled(g.FullName) {
+			g.FullName = preferCompleteName(g.FullName, labelName)
+		}
+		if nameLooksGarbled(g.FullName) {
 			g.FullName = ""
 		}
 	}

@@ -23,6 +23,21 @@ func TestPreferCompleteName(t *testing.T) {
 	}
 }
 
+func TestVisualNameRecoversGivenFromLabels(t *testing.T) {
+	// MRZ line 1 truncated so only the surname survives; the printed labels still
+	// carry the full given names. parsePassportVisual must return the complete name
+	// (this is the "NGUYEN" → "NGUYEN TRINITY HOANG" case).
+	txt := "P<USANGUYEN<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n" +
+		"6831017213USA0809214F2707266425711567<991344\n" +
+		"SURNAME/NOM/APELLIDOS\nNGUYEN\n" +
+		"GIVEN NAMES/PRENOMS/NOMBRES\nTRINITY HOANG\n" +
+		"SEX/SEXE/SEXO\nF\n"
+	g := parsePassportVisual(txt)
+	if g.FullName != "NGUYEN TRINITY HOANG" {
+		t.Fatalf("name = %q, want NGUYEN TRINITY HOANG", g.FullName)
+	}
+}
+
 func TestSharpenGray(t *testing.T) {
 	// Uniform image: 3x3 box blur equals the pixel, so unsharp is a no-op.
 	uni := image.NewGray(image.Rect(0, 0, 5, 5))
