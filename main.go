@@ -247,6 +247,10 @@ var aliases = map[string]string{
 	"ngay den": "arrival", "ngày đến": "arrival", "arrival": "arrival", "arrival date": "arrival", "check in": "arrival", "check-in": "arrival",
 	"ngay di": "departure", "ngày đi": "departure", "ngay di du kien": "departure", "ngày đi dự kiến": "departure", "departure": "departure", "check out": "departure", "check-out": "departure",
 	"ngay tra phong": "checkout", "ngày trả phòng": "checkout", "checkout date": "checkout", "actual departure": "checkout",
+	// Chinese tour rooming lists (headers may be CJK-only).
+	"英文姓名": "fullName", "护照号": "passport", "护照号码": "passport", "护照": "passport",
+	"出生日期": "birthDate", "生日": "birthDate", "性别": "gender", "国籍": "nationality",
+	"房号": "room", "房型": "room",
 }
 
 func readSpreadsheet(path string) ([]Guest, error) {
@@ -493,10 +497,15 @@ func detectMatrixHeader(row []string) map[string][]int {
 	norm := make([]string, len(row))
 	for j, c := range row {
 		norm[j] = normalizeKey(c)
-		if f := aliases[norm[j]]; f != "" {
-			if len(m[f]) == 0 {
-				m[f] = []int{j}
-			}
+		f := aliases[norm[j]]
+		// Bilingual headers (e.g. "NAME 英文姓名", "DOB 出生日期") keep the CJK text in
+		// the normalized key and miss every alias. Fall back to the ASCII-only part so
+		// the English half of a bilingual heading still maps to a field.
+		if f == "" {
+			f = aliases[asciiKey(c)]
+		}
+		if f != "" && len(m[f]) == 0 {
+			m[f] = []int{j}
 		}
 	}
 
@@ -1051,7 +1060,7 @@ func preferCompleteName(primary, alt string) string {
 
 func cleanName(s string) string {
 	u := strings.ToUpper(s)
-	u = regexp.MustCompile(`(?i)\b(MR|MS|MRS|MISS|T/L|DBL|TWN|TRPL|FES|FEF)\b`).ReplaceAllString(u, " ")
+	u = regexp.MustCompile(`(?i)\b(MR|MS|MRS|MISS|MSTR|MASTER|MDM|CHD|INF|T/L|DBL|TWN|TRPL|FES|FEF)\b`).ReplaceAllString(u, " ")
 	u = regexp.MustCompile(`\b[A-Z0-9]*\d[A-Z0-9]{5,}\b`).ReplaceAllString(u, " ")
 	u = strings.Join(strings.Fields(u), " ")
 	return strings.Trim(u, " /,.-")
@@ -1169,6 +1178,21 @@ func normalizeKey(s string) string {
 		case unicode.IsLetter(r) || unicode.IsDigit(r):
 			b.WriteRune(r)
 		default:
+			b.WriteByte(' ')
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// asciiKey is normalizeKey but keeps only ASCII letters/digits, dropping CJK and
+// other scripts. It lets a bilingual header like "NAME 英文姓名" match the "name"
+// alias via its English half.
+func asciiKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
 			b.WriteByte(' ')
 		}
 	}
